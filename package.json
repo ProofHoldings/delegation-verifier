@@ -1,0 +1,59 @@
+{
+  "name": "@proof-holdings/delegation-verifier",
+  "version": "0.1.0",
+  "description": "Issuer-agnostic verifier for Proof of Delegation tokens — checks that a domain authorized an agent artifact, against a trust policy you supply",
+  "type": "module",
+  "license": "MIT",
+  "author": "proof.holdings <hello@proof.holdings> (https://proof.holdings)",
+  "homepage": "https://proof.holdings",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ProofHoldings/delegation-verifier.git"
+  },
+  "bugs": {
+    "email": "hello@proof.holdings",
+    "url": "https://proof.holdings/support"
+  },
+  "keywords": [
+    "proof-of-delegation",
+    "delegation",
+    "attestation",
+    "mcp",
+    "a2a",
+    "agent-card",
+    "jwt",
+    "verification"
+  ],
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.5.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}
