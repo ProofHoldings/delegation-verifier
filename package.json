@@ -1,6 +1,6 @@
 {
   "name": "@proof-holdings/delegation-verifier",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Issuer-agnostic verifier for Proof of Delegation tokens — checks that a domain authorized an agent artifact, against a trust policy you supply",
   "type": "module",
   "license": "MIT",

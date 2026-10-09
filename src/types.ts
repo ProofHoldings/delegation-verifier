@@ -53,6 +53,43 @@ export interface TrustedIssuer {
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
+/**
+ * Where the verifier persists a key set between processes, so an applied tombstone survives a
+ * restart (and a serverless cold start). Supplied by the caller — this package has no storage of
+ * its own. `state` is an opaque string. A failing store never fails a verification.
+ */
+export interface KeySetStore {
+  load(jwksUri: string): Promise<string | null | undefined> | string | null | undefined;
+  save(jwksUri: string, state: string): Promise<void> | void;
+}
+
+export type JwksEventType =
+  /** A tombstone was seen for the first time and is waiting for a confirming fetch. */
+  | 'tombstone_pending'
+  /** A second fetch at least 5 minutes later confirmed the tombstone. */
+  | 'tombstone_applied'
+  /** Anomaly: the tombstone names a key last seen live. Applied by the same rule. */
+  | 'tombstone_for_live_key'
+  /** A JWKS narrowed a confirmed key's window; applied only if a fetch 5+ minutes later agrees. */
+  | 'window_narrowing_pending'
+  /** A second fetch at least 5 minutes later served the same narrowed window; it now applies. */
+  | 'window_narrowing_applied'
+  /** A JWKS moved a confirmed key's window wider and was refused whole. */
+  | 'window_widening_rejected'
+  /** A JWKS served new key material under a confirmed kid; the first-seen key is kept. */
+  | 'key_material_changed'
+  /** A confirmed registry key stopped being served before its retention ended. */
+  | 'kid_vanished'
+  /** The caller's `keySetStore` failed to load or save. */
+  | 'store_error';
+
+export interface JwksEvent {
+  type: JwksEventType;
+  jwksUri: string;
+  kid?: string;
+  message: string;
+}
+
 export interface VerifyOptions {
   /** REQUIRED, no default. An empty list fails closed with `no_trust_policy`. */
   trustedIssuers: TrustedIssuer[];
@@ -87,8 +124,19 @@ export interface VerifyOptions {
   now?: Date;
   /** Injected fetch (tests, proxies, non-Node runtimes). Defaults to global fetch. */
   fetch?: FetchLike;
-  /** Per-request network timeout in ms. Default 5000. */
+  /** Per-request network timeout in ms, also bounding each `keySetStore` call. Default 5000. */
   timeoutMs?: number;
+  /**
+   * How old a cached key set may be when a refetch FAILS. Under the bound the verifier keeps
+   * using the cache's confirmed keys; over it, the answer is `jwks_stale`. A healthy issuer is still refetched
+   * every 10 minutes. Default 24h. Above 25 days is `invalid_options`: the issuer publishes its
+   * next key about 30 days ahead, and a cache older than that can miss it.
+   */
+  maxJwksAgeMs?: number;
+  /** Persist the key set (tombstones included) across processes. */
+  keySetStore?: KeySetStore;
+  /** Receives key-set anomalies and tombstone progress. Default: ignored. */
+  onJwksEvent?: (event: JwksEvent) => void;
 }
 
 export type FailureReason =
@@ -102,6 +150,16 @@ export type FailureReason =
   | 'unknown_key'
   | 'bad_signature'
   | 'jwks_unavailable'
+  /** The issuer revoked the signing key (an applied JWKS tombstone). Carries `pullHint`. */
+  | 'key_revoked'
+  /** A refetch failed and the cached key set is older than `maxJwksAgeMs`. */
+  | 'jwks_stale'
+  /** The signing key belongs to another key family than this token. */
+  | 'wrong_key_purpose'
+  /** The token's `iat` lies outside the signing key's window (5 minutes of skew allowed). */
+  | 'outside_key_window'
+  /** `exp` lies beyond `iat` plus the signing key's `max_token_lifetime`. */
+  | 'token_lifetime_exceeded'
   | 'not_a_delegation'
   | 'unsupported_schema'
   | 'expired'
@@ -128,13 +186,14 @@ export type FailureOutcome = 'invalid' | 'unconfirmed';
 const UNCONFIRMED_REASONS: ReadonlySet<FailureReason> = new Set([
   'status_unavailable',
   'jwks_unavailable',
+  'jwks_stale',
   'status_uri_untrusted',
 ]);
 
 /**
  * Whether a `FailureReason` means "checked, and it's bad" (`invalid`) or "could not check"
- * (`unconfirmed`). The three status-channel reasons that mean the revocation check itself
- * failed are `unconfirmed`; every other reason is a completed check with a negative verdict,
+ * (`unconfirmed`). The reasons in `UNCONFIRMED_REASONS` mean the key or revocation check itself
+ * could not run, and are `unconfirmed`; every other reason is a completed check with a negative verdict,
  * including a call-shape error — `verifyDelegation` always receives a well-formed
  * `VerifyOptions` in practice, so those are `invalid` for exhaustiveness, not because they
  * occur.
@@ -185,6 +244,16 @@ export interface VerificationFailure {
   /** `classifyFailureReason(reason)` — set for every failure, never left for the caller to derive. */
   outcome: FailureOutcome;
   message: string;
+  /**
+   * `key_revoked` only: where a re-signed token can be fetched — the trusted issuer's origin and
+   * the token's own handle. The handle is read from a token whose signature was NOT checked (its
+   * key is revoked), so treat it as an address to ask, never as a verified identity.
+   */
+  pullHint?: { issuerOrigin: string; handle: string };
+  /** `jwks_stale` only: age of the cached key set in seconds, or null when unknown. */
+  cacheAgeSeconds?: number | null;
+  /** `jwks_stale` only: what to refetch, and the exported function that does it. */
+  refreshHint?: { jwksUri: string; method: 'refreshJwks' };
 }
 
 export type VerificationResult = VerificationSuccess | VerificationFailure;

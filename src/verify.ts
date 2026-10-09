@@ -8,14 +8,23 @@
  */
 
 import { canonicalizeDelegate, DelegateIdentifierError } from './delegate.js';
-import { getVerificationKeys, isSupportedAlgorithm, verifySignature } from './jwks.js';
+import {
+  DEFAULT_MAX_JWKS_AGE_MS,
+  isSupportedAlgorithm,
+  MAX_JWKS_AGE_CAP_MS,
+  resolveVerificationKeys,
+  verifyWithCandidates,
+} from './jwks.js';
+import type { KeySetOptions } from './jwks.js';
 import { parseJwt } from './jwt.js';
 import { checkDelegationStatus } from './status.js';
 import { classifyFailureReason } from './types.js';
 import type {
   FailureReason,
   FetchLike,
+  KeySetStore,
   TrustedIssuer,
+  VerificationFailure,
   VerificationResult,
   VerifyOptions,
 } from './types.js';
@@ -26,8 +35,12 @@ const SUPPORTED_SCHEMA_MAJOR = '1';
 const DEFAULT_CLOCK_TOLERANCE_SECONDS = 5;
 const DEFAULT_TIMEOUT_MS = 5_000;
 
-function fail(reason: FailureReason, message: string): VerificationResult {
-  return { valid: false, reason, outcome: classifyFailureReason(reason), message };
+function fail(
+  reason: FailureReason,
+  message: string,
+  extra: Pick<VerificationFailure, 'pullHint' | 'cacheAgeSeconds' | 'refreshHint'> = {}
+): VerificationResult {
+  return { valid: false, reason, outcome: classifyFailureReason(reason), message, ...extra };
 }
 
 function findTrustedIssuer(issuers: TrustedIssuer[], iss: unknown): TrustedIssuer | undefined {
@@ -108,6 +121,25 @@ export async function verifyDelegation(token: string, options: VerifyOptions): P
     if (typeof options.expectedPrincipal !== 'string' || options.expectedPrincipal.trim().length === 0) {
       return fail('invalid_options', 'expectedPrincipal must be a non-empty string when supplied');
     }
+  }
+
+  if (options.maxJwksAgeMs !== undefined) {
+    const age = options.maxJwksAgeMs;
+    if (typeof age !== 'number' || !Number.isInteger(age) || age <= 0 || age > MAX_JWKS_AGE_CAP_MS) {
+      return fail(
+        'invalid_options',
+        `maxJwksAgeMs must be a whole number of milliseconds from 1 to ${MAX_JWKS_AGE_CAP_MS} (25 days)`
+      );
+    }
+  }
+  if (options.keySetStore !== undefined) {
+    const store = options.keySetStore as Partial<KeySetStore> | null;
+    if (!store || typeof store.load !== 'function' || typeof store.save !== 'function') {
+      return fail('invalid_options', 'keySetStore must provide load(jwksUri) and save(jwksUri, state)');
+    }
+  }
+  if (options.onJwksEvent !== undefined && typeof options.onJwksEvent !== 'function') {
+    return fail('invalid_options', 'onJwksEvent must be a function');
   }
 
   const issuers = Array.isArray(options.trustedIssuers) ? options.trustedIssuers.filter(isValidIssuerEntry) : [];
@@ -210,31 +242,51 @@ export async function verifyDelegation(token: string, options: VerifyOptions): P
   }
 
   // ---------------------------------------------------------------- signature
-  let keys: CryptoKey[];
-  try {
-    keys = await getVerificationKeys({
-      jwksUri: issuer.jwksUri,
-      kid: typeof parsed.header.kid === 'string' ? parsed.header.kid : undefined,
-      alg,
-      fetch: fetchImpl,
-      timeoutMs,
-    });
-  } catch (error) {
-    // "I could not check" is not "the token is bad" — it gets its own reason.
-    return fail('jwks_unavailable', error instanceof Error ? error.message : 'JWKS could not be fetched');
-  }
-  if (keys.length === 0) {
-    return fail('unknown_key', 'no key in the issuer JWKS matches this token');
+  const keySetOptions: KeySetOptions = {
+    maxJwksAgeMs: options.maxJwksAgeMs ?? DEFAULT_MAX_JWKS_AGE_MS,
+    keySetStore: options.keySetStore,
+    onJwksEvent: options.onJwksEvent,
+  };
+  const resolution = await resolveVerificationKeys({
+    jwksUri: issuer.jwksUri,
+    kid: typeof parsed.header.kid === 'string' ? parsed.header.kid : undefined,
+    alg,
+    family: 'delegation',
+    fetch: fetchImpl,
+    timeoutMs,
+    ...keySetOptions,
+  });
+  switch (resolution.kind) {
+    case 'unavailable':
+      // "I could not check" is not "the token is bad" — it gets its own reason.
+      return fail('jwks_unavailable', resolution.message);
+    case 'stale':
+      return fail(
+        'jwks_stale',
+        `the issuer JWKS could not be refetched and the cached copy is older than maxJwksAgeMs (${keySetOptions.maxJwksAgeMs} ms)`,
+        { cacheAgeSeconds: resolution.cacheAgeSeconds, refreshHint: { jwksUri: issuer.jwksUri, method: 'refreshJwks' } }
+      );
+    case 'revoked':
+      // Decided before the signature: the key is revoked, whoever signed with it.
+      return fail('key_revoked', `the issuer revoked signing key "${resolution.kid}"`, {
+        pullHint: { issuerOrigin: new URL(issuer.jwksUri).origin, handle: sub },
+      });
+    case 'wrong_purpose':
+      return fail('wrong_key_purpose', `signing key "${resolution.kid}" is not a delegation key`);
+    case 'unknown':
+      return fail('unknown_key', 'no key in the issuer JWKS matches this token');
+    case 'keys':
+      break;
   }
 
-  let signatureOk = false;
-  for (const key of keys) {
-    if (await verifySignature(key, alg, parsed.signingInput, parsed.signature)) {
-      signatureOk = true;
-      break;
-    }
+  const verdict = await verifyWithCandidates(resolution, alg, parsed.signingInput, parsed.signature, { iat, exp });
+  if (verdict === 'bad_signature') return fail('bad_signature', 'token signature is invalid');
+  if (verdict === 'outside_key_window') {
+    return fail('outside_key_window', "token iat lies outside the signing key's window");
   }
-  if (!signatureOk) return fail('bad_signature', 'token signature is invalid');
+  if (verdict === 'token_lifetime_exceeded') {
+    return fail('token_lifetime_exceeded', "token exp lies beyond iat plus the signing key's max_token_lifetime");
+  }
 
   const delegation = {
     issuer: issuer.issuer,
@@ -264,6 +316,7 @@ export async function verifyDelegation(token: string, options: VerifyOptions): P
     timeoutMs,
     now,
     clockToleranceSeconds,
+    keySetOptions,
   });
 
   switch (status.state) {

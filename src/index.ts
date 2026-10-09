@@ -47,8 +47,16 @@ export {
   DELEGATE_TYPES,
   DELEGATE_MAX_LENGTH,
 } from './delegate.js';
-export { resetJwksCache, SUPPORTED_ALGORITHMS } from './jwks.js';
-export type { SupportedAlgorithm } from './jwks.js';
+export {
+  clearTombstones,
+  DEFAULT_MAX_JWKS_AGE_MS,
+  getJwksDiagnostics,
+  MAX_JWKS_AGE_CAP_MS,
+  refreshJwks,
+  resetJwksCache,
+  SUPPORTED_ALGORITHMS,
+} from './jwks.js';
+export type { JwksDiagnostics, SupportedAlgorithm } from './jwks.js';
 export { readStatusSlot } from './status.js';
 export { classifyFailureReason } from './types.js';
 export type {
@@ -57,6 +65,9 @@ export type {
   FailureOutcome,
   FailureReason,
   FetchLike,
+  JwksEvent,
+  JwksEventType,
+  KeySetStore,
   TrustedIssuer,
   VerificationFailure,
   VerificationResult,

@@ -85,21 +85,29 @@ presented as *"X says it authorized this"*, never as *verified*.
 1. **Trust policy** — the token's `iss` must be one you named. No trust list, no verification.
 2. **Signature** — RS256/ES256 against the issuer's JWKS. The algorithm is chosen by the
    verifier, never read from the token, so `alg: none` and HMAC forgeries die before any key is
-   fetched. Key sets are cached; an unknown `kid` triggers at most one refetch per 30s.
+   fetched. Key sets are cached; an unknown `kid` triggers at most one refetch per 30s. The
+   signing key's purpose, window and tombstone are checked here too — see
+   [Key rotation](#key-rotation-and-the-key-set-cache).
 3. **Claims** — `token_type`, schema version, `exp`/`iat` (5s tolerance by default), and the
    required claim set.
 4. **Principal** — pinned to the domain you expect, when you supply one. See above: without it
    the answer says who *claims* the artifact, not that the right party did.
 5. **Delegate** — canonicalized and compared byte-for-byte with the identity you resolved.
-6. **Status** — two channels, both authenticated:
+6. **Status** — two channels, both authenticated, asked in order:
    - the IETF Token Status List the token points at (`status.status_list`), whose uri is
      refused unless it belongs to your trusted issuer, and whose signature is checked against
-     the same key set;
-   - the issuer's status endpoint, which is the only thing that can report the **cascade**: a
-     delegation is worth no more than the domain control proof beneath it, and a revoked domain
-     proof does not flip the delegation's own status-list bit.
+     the same key set. A readable `valid`, `revoked` or `suspended` slot is the answer, and the
+     check stops there. An issuer whose validity cascades folds a revoked or suspended domain
+     control proof beneath the delegation into this same slot (proof.holdings does);
+   - the issuer's status endpoint, asked only when the list gives no answer: the token carries
+     no status-list claim, or the list cannot be read, is not the trusted issuer's, or holds no
+     valid/revoked/suspended value for the token's slot. One thing
+     only the endpoint can report is an **expiry** inherited from the domain control proof, which
+     a list slot never encodes. A delegation whose own slot and own `exp` both read fine is
+     therefore not re-checked for it — an accepted residual, explained in
+     [Why the status endpoint is not always called](#why-the-status-endpoint-is-not-always-called-and-what-that-leaves-uncovered).
 
-   Status checking is **fail-closed**: if either channel cannot answer, the result is
+   Status checking is **fail-closed**: if neither channel gives an answer, the result is
    `status_unavailable`, not "valid". Pass `statusCheck: 'skip'` to check signature and claims
    only — the result then carries `statusChecked: false`, which means *revocation was not
    checked*, never *not revoked*.
@@ -121,6 +129,56 @@ than before.
 `POST <statusEndpoint>` with `{"proof_token": "<jwt>"}` answering JSON with at least
 `{"valid": boolean}` and optionally `{"reason": "revoked" | "suspended" | ...}`.
 
+## Key rotation and the key-set cache
+
+An issuer's JWKS may carry several keys at once. Beside the standard members, a key may declare
+`proof_purpose` (`proof`, `delegation` or `status-list`), a window (`not_before`, `not_after`,
+`max_token_lifetime` — integer seconds) or `proof_legacy: true`; revoked keys are listed in a
+top-level `proof_tombstones: [{ "kid", "revoked_at" }]`. A key set without these members verifies
+exactly as before. Once any key carries `proof_purpose`:
+
+- a delegation must be signed by a `delegation` key or a legacy one (`wrong_key_purpose`);
+- its `iat` must lie in the key's window, ± 5 minutes (`outside_key_window`), and its `exp` no later
+  than `iat + max_token_lifetime` (`token_lifetime_exceeded`) — legacy keys skip both;
+- a token without `kid` is tried against legacy keys only.
+
+The status list's own signing key is held to the same rules as a `status-list` key; a list signed by
+a key that fails them counts as unreadable, exactly like a list that could not be fetched.
+
+**One response is never trusted for long.** A new key verifies from its first sighting, so an
+emergency key works at once. But the verifier only *remembers* a key carrying `proof_purpose` or
+`proof_legacy` — keeps it after it disappears from the JWKS, refuses new key material under its
+`kid`, refuses whole a document that widens its window — once two fetches at least 5 minutes apart
+served it unchanged; until then the next document replaces or drops it. A narrower window and a
+tombstone wait for the same confirmation: a tombstone applies only when a fetch at least 5 minutes
+after its first sighting still carries it (a fetch in between that drops it starts over;
+`refreshJwks` forces the second fetch), and once applied it stays until `revoked_at` + 365 days or
+`clearTombstones()`, whatever later documents say.
+
+The key set is refetched every 10 minutes. When a refetch fails, the cache's confirmed keys keep
+answering until it is `maxJwksAgeMs` old, then the answer is `jwks_stale`; an applied tombstone
+answers `key_revoked` at any age. A failed refetch of a cached set is retried at most once per 30s.
+The cache lives in the process, keyed by `jwksUri`.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `maxJwksAgeMs` | 24 h | How old the cache may be when a refetch fails. Above 25 days, non-integer or ≤ 0 is `invalid_options`. |
+| `keySetStore` | none | `{ load(jwksUri), save(jwksUri, state) }`, sync or async, opaque string state. Persists the key set — tombstones included — across restarts and cold starts. A failing store never fails a verification. |
+| `onJwksEvent` | ignored | Receives `{ type, jwksUri, kid?, message }`: `tombstone_pending`, `tombstone_applied`, `tombstone_for_live_key`, `window_narrowing_pending`, `window_narrowing_applied`, `window_widening_rejected`, `key_material_changed`, `kid_vanished`, `store_error`. |
+| `timeoutMs` | 5000 | Bounds each network request and each `keySetStore` call. |
+
+Exported alongside `verifyDelegation`:
+
+- `refreshJwks({ jwksUri, fetch?, timeoutMs?, keySetStore?, onJwksEvent? })` — refetch now,
+  ignoring the TTL and cooldowns; resolves `{ ok: true }` or `{ ok: false, message }`. The method a
+  `jwks_stale` result's `refreshHint` names.
+- `clearTombstones({ jwksUri?, keySetStore? })` — the manual reset: forgets applied and pending
+  tombstones for one key set (and its persisted copy), or for every set in memory.
+- `getJwksDiagnostics(jwksUri)` — cache age, whether the registry is live, vanished keys, pending and
+  applied tombstones; `null` for a key set this process has never used.
+- `DEFAULT_MAX_JWKS_AGE_MS`, `MAX_JWKS_AGE_CAP_MS` — to validate your own configuration against the
+  same bounds.
+
 ## Failure reasons
 
 Every failure carries an `outcome: 'invalid' | 'unconfirmed'` beside `reason` —
@@ -138,7 +196,12 @@ because they occur in practice).
 | `untrusted_issuer` | `invalid` | Signed by someone you did not name. |
 | `unsupported_algorithm` | `invalid` | The token asked for an algorithm this verifier does not accept. |
 | `unknown_key` / `bad_signature` | `invalid` | No matching key, or the signature does not hold. |
-| `jwks_unavailable` | `unconfirmed` | Could not read the key set — "I could not check", not "it is bad". |
+| `jwks_unavailable` | `unconfirmed` | Could not read the key set, or could not refetch it for an unknown `kid` — "I could not check", not "it is bad". |
+| `jwks_stale` | `unconfirmed` | A refetch failed and the cached key set is older than `maxJwksAgeMs`. Carries `cacheAgeSeconds` (null when unknown) and `refreshHint: { jwksUri, method: 'refreshJwks' }`. |
+| `key_revoked` | `invalid` | The issuer revoked the signing key (an applied JWKS tombstone). Carries `pullHint: { issuerOrigin, handle }` — where to ask for a re-signed token. The handle is read from a token whose signature was not checked: an address to ask, not a verified identity. |
+| `wrong_key_purpose` | `invalid` | The signing key belongs to another key family than a delegation. |
+| `outside_key_window` | `invalid` | The token's `iat` lies outside the signing key's window (5 minutes of skew allowed). |
+| `token_lifetime_exceeded` | `invalid` | `exp` lies beyond `iat` plus the signing key's `max_token_lifetime`. |
 | `not_a_delegation` / `unsupported_schema` | `invalid` | Wrong token type or a schema major this version does not understand. |
 | `expired` / `not_yet_valid` / `malformed_claims` | `invalid` | Claim-level rejections. |
 | `principal_mismatch` | `invalid` | Issued by a different domain than you expected. |
@@ -160,17 +223,19 @@ that token's validity in it. An issuer that keeps a side-channel revocation reas
 published list is not honoring the channel it chose to publish — a fact about that issuer, not
 something a generic verifier can special-case.
 
-The endpoint still fires for the cases the bit structurally cannot answer: a token with no
-status-list claim at all, `unknown_delegation` ("no record of this handle" is distinguishable
-from "a record that is dead" only by a live call), and — for issuers whose validity cascades
-through something else, like a domain control proof underneath a delegation — an EXPIRY driven by
-that something else, which a status-list bit never encodes (only revoked/suspended are, by the
-same draft's own vocabulary). For proof.holdings specifically, that cascade-expiry gap is bounded,
-not eliminated: a delegation can no longer be minted longer than its underlying control proof, and
-a control cannot be re-issued shorter than an outstanding delegation without capping the
-reissue to cover it — but a control shortened before that guarantee existed, or a reissue that hit
-its own rare fail-open path, can still leave a delegation whose list bit and own `exp` claim both
-read fine while its issuer would answer `expired`. This is a known, accepted trade-off — not
+The endpoint is asked only when the list gives no answer: the token carries no status-list claim,
+or the list cannot be read, is not the trusted issuer's, or holds no valid/revoked/suspended value
+for the token's slot. It is the only channel that can report two things the bit structurally
+cannot — `unknown_delegation` ("no record of this handle" is distinguishable from "a record that
+is dead" only by a live call) and, for issuers whose validity cascades through something else, like
+a domain control proof underneath a delegation, an EXPIRY driven by that something else, which a
+status-list bit never encodes (only revoked/suspended are, by the same draft's own vocabulary) —
+so when the list does answer, neither is checked. For proof.holdings specifically, that
+cascade-expiry gap is bounded, not eliminated: a delegation can no longer be minted longer than its
+underlying control proof, and a control cannot be re-issued shorter than an outstanding delegation
+without capping the reissue to cover it — but a control shortened before that guarantee existed, or a
+reissue that hit its own rare fail-open path, can still leave a delegation whose list bit and own
+`exp` claim both read fine while its issuer would answer `expired`. This is a known, accepted trade-off — not
 silently assumed away.
 
 ### One thing a failure reason is not

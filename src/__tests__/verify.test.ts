@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { verifyDelegation } from '../verify.js';
 import { resetJwksCache } from '../jwks.js';
@@ -621,5 +622,54 @@ describe('malformed input', () => {
 
     expectFailure(result);
     expect(result.reason).toBe('malformed_token');
+  });
+});
+
+/**
+ * `sdks/shared/fixtures/status_list_origin.json`, shared with the four SDKs. A refused uri is never
+ * requested; the read then falls through to the configured `statusEndpoint`, whose answer is the
+ * verdict — so "refused" shows on the wire, not in `reason`, which stays what it is today.
+ */
+describe('the shared status-list origin fixture', () => {
+  const fixture = JSON.parse(
+    readFileSync(new URL('../../../../sdks/shared/fixtures/status_list_origin.json', import.meta.url), 'utf8')
+  ) as {
+    configured_origin: string;
+    status_list_origins: string[];
+    cases: Array<{ name: string; uri: string; delegation_verifier: 'accepted' | 'rejected' }>;
+  };
+  const configured = fixture.configured_origin;
+  const jwksUri = `${configured}/.well-known/jwks.json`;
+  const statusEndpoint = `${configured}/api/v1/proofs/validate`;
+
+  it.each(fixture.cases)('$name: the status list is $delegation_verifier', async (testCase) => {
+    const token = await signJwt(
+      delegationClaims({ status: { status_list: { idx: 1, uri: testCase.uri } } }),
+      key
+    );
+    const net = mockFetch({ [jwksUri]: jwksBody(key), [statusEndpoint]: { json: { valid: true } } });
+
+    const result = await verifyDelegation(
+      token,
+      options({
+        fetch: net.fetch,
+        trustedIssuers: [
+          { issuer: ISSUER, jwksUri, statusEndpoint, statusListOrigins: fixture.status_list_origins },
+        ],
+      })
+    );
+    const listPath = new URL(testCase.uri).pathname;
+    const listRequests = net.calls.filter((url) => new URL(url).pathname === listPath);
+
+    expect(result.valid).toBe(true);
+    expect(net.calls).toContain(jwksUri);
+    expect(net.calls).toContain(statusEndpoint);
+    if (testCase.delegation_verifier === 'accepted') {
+      // Unrouted, so the list read fails and falls through too: what is pinned is that it was made.
+      expect(listRequests).toHaveLength(1);
+      expect(new URL(listRequests[0]).origin).toBe(new URL(testCase.uri).origin);
+    } else {
+      expect(listRequests).toEqual([]);
+    }
   });
 });

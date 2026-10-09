@@ -14,7 +14,7 @@ function readFailureReasonUnion(): string[] {
   return [...match[1].matchAll(/'([a-z_]+)'/g)].map((entry) => entry[1]);
 }
 
-const UNCONFIRMED: FailureReason[] = ['status_unavailable', 'jwks_unavailable', 'status_uri_untrusted'];
+const UNCONFIRMED: FailureReason[] = ['status_unavailable', 'jwks_unavailable', 'jwks_stale', 'status_uri_untrusted'];
 
 describe('classifyFailureReason (h-delegation-verifier-status-fallthrough-gate SC-3)', () => {
   it('positive control: the source scan actually finds reasons', () => {

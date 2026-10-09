@@ -129,10 +129,11 @@ function canonicalizeUrl(value: string): string {
   }
 
   // URL() already lowercases the host and strips an explicit default port; pathname keeps its
-  // case. Trailing slash is canonicalized away except at the root, where it is always '/'.
+  // case. Trailing slash is canonicalized away except at the root, where it is always '/' — a
+  // path of slashes only collapses to that root, so the result is idempotent.
   let pathname = parsed.pathname;
   if (pathname.length > 1 && pathname.endsWith('/')) {
-    pathname = pathname.replace(/\/+$/, '');
+    pathname = pathname.replace(/\/+$/, '') || '/';
   }
 
   return enforceLength(`https://${parsed.host}${pathname}`);

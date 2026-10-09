@@ -34,7 +34,14 @@
  */
 
 import { base64UrlToBytes, isRecord, parseJwt } from './jwt.js';
-import { getVerificationKeys, isSupportedAlgorithm, MAX_REMOTE_BODY_BYTES, verifySignature } from './jwks.js';
+import {
+  DEFAULT_MAX_JWKS_AGE_MS,
+  isSupportedAlgorithm,
+  MAX_REMOTE_BODY_BYTES,
+  resolveVerificationKeys,
+  verifyWithCandidates,
+} from './jwks.js';
+import type { KeySetOptions } from './jwks.js';
 import type { FetchLike, TrustedIssuer } from './types.js';
 
 export type StatusOutcome =
@@ -110,6 +117,7 @@ async function checkStatusList(params: {
   timeoutMs: number;
   now: Date;
   clockToleranceSeconds: number;
+  keySetOptions: KeySetOptions;
 }): Promise<StatusOutcome> {
   const { claim, issuer } = params;
 
@@ -174,34 +182,41 @@ async function checkStatusList(params: {
     };
   }
 
-  let keys: CryptoKey[];
-  try {
-    keys = await getVerificationKeys({
-      jwksUri: issuer.jwksUri,
-      kid: typeof parsed.header.kid === 'string' ? parsed.header.kid : undefined,
-      alg,
-      fetch: params.fetch,
-      timeoutMs: params.timeoutMs,
-    });
-  } catch (error) {
-    return {
-      state: 'unavailable',
-      message: `status list signing key unavailable: ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
-  if (keys.length === 0) {
-    return { state: 'unavailable', message: 'status list is signed by an unknown key' };
+  // The list's key is held to the same policy as the delegation's, under its own family: a
+  // revoked, borrowed or out-of-window key is "cannot answer", which falls through to the endpoint.
+  const resolution = await resolveVerificationKeys({
+    jwksUri: issuer.jwksUri,
+    kid: typeof parsed.header.kid === 'string' ? parsed.header.kid : undefined,
+    alg,
+    family: 'status-list',
+    fetch: params.fetch,
+    timeoutMs: params.timeoutMs,
+    ...params.keySetOptions,
+  });
+  switch (resolution.kind) {
+    case 'unavailable':
+      return { state: 'unavailable', message: `status list signing key unavailable: ${resolution.message}` };
+    case 'stale':
+      return { state: 'unavailable', message: 'status list signing key unavailable: the cached issuer JWKS is stale' };
+    case 'revoked':
+      return { state: 'unavailable', message: `status list signing key "${resolution.kid}" has been revoked by the issuer` };
+    case 'wrong_purpose':
+      return { state: 'unavailable', message: `status list signing key "${resolution.kid}" is not a status-list key` };
+    case 'unknown':
+      return { state: 'unavailable', message: 'status list is signed by an unknown key' };
+    case 'keys':
+      break;
   }
 
-  let signatureOk = false;
-  for (const key of keys) {
-    if (await verifySignature(key, alg, parsed.signingInput, parsed.signature)) {
-      signatureOk = true;
-      break;
-    }
-  }
-  if (!signatureOk) {
+  const verdict = await verifyWithCandidates(resolution, alg, parsed.signingInput, parsed.signature, {
+    iat: parsed.payload.iat,
+    exp: parsed.payload.exp,
+  });
+  if (verdict === 'bad_signature') {
     return { state: 'unavailable', message: 'status list signature is invalid' };
+  }
+  if (verdict !== 'ok') {
+    return { state: 'unavailable', message: `status list signing key policy violated: ${verdict}` };
   }
 
   // The list must say it is the list we asked for, or a valid list from the same issuer could
@@ -336,6 +351,8 @@ export async function checkDelegationStatus(params: {
   timeoutMs: number;
   now: Date;
   clockToleranceSeconds: number;
+  /** Omitted: the package defaults, as `verifyDelegation` applies them. */
+  keySetOptions?: KeySetOptions;
 }): Promise<StatusOutcome> {
   const claim = readStatusListClaim(params.claims);
   if (claim) {
@@ -346,6 +363,7 @@ export async function checkDelegationStatus(params: {
       timeoutMs: params.timeoutMs,
       now: params.now,
       clockToleranceSeconds: params.clockToleranceSeconds,
+      keySetOptions: params.keySetOptions ?? { maxJwksAgeMs: DEFAULT_MAX_JWKS_AGE_MS },
     });
     // Authoritative for `valid`/`revoked`/`suspended` — the fold (h-status-list-cascade-fold)
     // makes those three the issuer's whole answer for this delegation's own bit.
