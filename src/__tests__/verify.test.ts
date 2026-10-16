@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { verifyDelegation } from '../verify.js';
 import { resetJwksCache } from '../jwks.js';
@@ -629,10 +629,20 @@ describe('malformed input', () => {
  * `sdks/shared/fixtures/status_list_origin.json`, shared with the four SDKs. A refused uri is never
  * requested; the read then falls through to the configured `statusEndpoint`, whose answer is the
  * verdict — so "refused" shows on the wire, not in `reason`, which stays what it is today.
+ *
+ * The fixtures exist only in the monorepo, never in this package's public mirror, so there this suite
+ * skips (see `vitest.config.ts`). Keyed on the directory rather than on the file, so that inside the
+ * monorepo a renamed fixture still fails loudly.
  */
-describe('the shared status-list origin fixture', () => {
-  const fixture = JSON.parse(
-    readFileSync(new URL('../../../../sdks/shared/fixtures/status_list_origin.json', import.meta.url), 'utf8')
+const SHARED_FIXTURES = new URL('../../../../sdks/shared/fixtures/', import.meta.url);
+const HAS_SHARED_FIXTURES = existsSync(SHARED_FIXTURES);
+
+describe.skipIf(!HAS_SHARED_FIXTURES)('the shared status-list origin fixture', () => {
+  // vitest still runs a skipped suite's body to collect it, so the read waits on the same gate.
+  const fixture = (
+    HAS_SHARED_FIXTURES
+      ? JSON.parse(readFileSync(new URL('status_list_origin.json', SHARED_FIXTURES), 'utf8'))
+      : { configured_origin: 'https://fixture.invalid', status_list_origins: [], cases: [] }
   ) as {
     configured_origin: string;
     status_list_origins: string[];
