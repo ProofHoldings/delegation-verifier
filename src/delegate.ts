@@ -19,12 +19,6 @@ export const DELEGATE_TYPES: readonly DelegateType[] = ['url', 'purl'] as const;
 /** Cap on the CANONICAL delegate string. */
 export const DELEGATE_MAX_LENGTH = 512;
 
-export const DELEGATION_SCOPE_MAX_ENTRIES = 32;
-export const DELEGATION_SCOPE_TOKEN_MAX_LENGTH = 64;
-
-/** Lowercase kebab-case: `send-email`, `read-profile-v2`. */
-const SCOPE_TOKEN_RE = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
-
 /** `pkg:type/[namespace/]name` — structure only; per-type case rules applied after. */
 const PURL_RE = /^pkg:([a-z0-9.+-]+)\/(.+)$/i;
 
@@ -144,35 +138,4 @@ function enforceLength(canonical: string): string {
     throw new DelegateIdentifierError(`delegate is too long (max ${DELEGATE_MAX_LENGTH} characters)`);
   }
   return canonical;
-}
-
-/**
- * Validate and canonicalize a scope list: every entry a lowercase kebab-case token,
- * deduplicated, sorted. Throws `DelegateIdentifierError` on any rejection.
- */
-export function canonicalizeScopes(scopes: string[]): string[] {
-  if (!Array.isArray(scopes) || scopes.length === 0) {
-    throw new DelegateIdentifierError('scope must contain at least one entry');
-  }
-  if (scopes.length > DELEGATION_SCOPE_MAX_ENTRIES) {
-    throw new DelegateIdentifierError(`too many scope entries (max ${DELEGATION_SCOPE_MAX_ENTRIES})`);
-  }
-
-  for (const token of scopes) {
-    if (typeof token !== 'string' || token.length === 0) {
-      throw new DelegateIdentifierError('scope entries must be non-empty strings');
-    }
-    if (token.length > DELEGATION_SCOPE_TOKEN_MAX_LENGTH) {
-      throw new DelegateIdentifierError(
-        `scope entry is too long (max ${DELEGATION_SCOPE_TOKEN_MAX_LENGTH} characters)`
-      );
-    }
-    if (!SCOPE_TOKEN_RE.test(token)) {
-      throw new DelegateIdentifierError(
-        `invalid scope entry "${token}" — lowercase kebab-case tokens only (e.g. send-email)`
-      );
-    }
-  }
-
-  return [...new Set(scopes)].sort();
 }

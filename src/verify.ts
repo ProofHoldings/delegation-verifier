@@ -29,8 +29,11 @@ import type {
   VerifyOptions,
 } from './types.js';
 
-/** Delegation token schema versions this verifier understands (major-compatible). */
-const SUPPORTED_SCHEMA_MAJOR = '1';
+/**
+ * Delegation token schema versions this verifier understands (major-compatible). Schema 2.0
+ * removed `scope`; a 1.x token is refused with `unsupported_version`.
+ */
+const SUPPORTED_SCHEMA_MAJOR = '2';
 
 const DEFAULT_CLOCK_TOLERANCE_SECONDS = 5;
 const DEFAULT_TIMEOUT_MS = 5_000;
@@ -101,16 +104,10 @@ export async function verifyDelegation(token: string, options: VerifyOptions): P
     );
   }
 
-  // Compared as exact strings, deliberately NOT through the issuer-side scope canonicalizer:
-  // scope grammar is the issuer's, and running another issuer's `mcp:tools/call` through
-  // proof.holdings' kebab-case rules would make the requirement unaskable rather than merely
-  // over-constrained.
-  let requiredScopes: string[] = [];
-  if (options.requiredScopes !== undefined) {
-    if (!Array.isArray(options.requiredScopes) || options.requiredScopes.some((entry) => typeof entry !== 'string')) {
-      return fail('invalid_options', 'requiredScopes must be an array of strings');
-    }
-    requiredScopes = options.requiredScopes.map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+  // Removed in 0.2.0 together with the claim. Refused rather than ignored: an untyped caller still
+  // passing it would otherwise read a valid answer as "the scopes I required were granted".
+  if ((options as { requiredScopes?: unknown }).requiredScopes !== undefined) {
+    return fail('invalid_options', 'requiredScopes is no longer supported: delegation schema 2.0 carries no scope');
   }
 
   // Validated like every other option rather than trusted: this is the pin that closes the
@@ -184,12 +181,12 @@ export async function verifyDelegation(token: string, options: VerifyOptions): P
   const schemaVersion = claims.delegation_schema_version;
   if (typeof schemaVersion !== 'string' || schemaVersion.split('.')[0] !== SUPPORTED_SCHEMA_MAJOR) {
     return fail(
-      'unsupported_schema',
+      'unsupported_version',
       `delegation_schema_version ${JSON.stringify(schemaVersion)} is not supported (this verifier understands ${SUPPORTED_SCHEMA_MAJOR}.x)`
     );
   }
 
-  const { sub, principal, delegate, control_proof: controlProof, scope, iat, exp } = claims;
+  const { sub, principal, delegate, control_proof: controlProof, iat, exp } = claims;
   if (
     typeof sub !== 'string' ||
     sub.length === 0 ||
@@ -199,13 +196,10 @@ export async function verifyDelegation(token: string, options: VerifyOptions): P
     delegate.length === 0 ||
     typeof controlProof !== 'string' ||
     controlProof.length === 0 ||
-    !Array.isArray(scope) ||
-    scope.length === 0 ||
-    scope.some((entry) => typeof entry !== 'string') ||
     typeof iat !== 'number' ||
     typeof exp !== 'number'
   ) {
-    return fail('malformed_claims', 'token is missing one of sub / principal / delegate / control_proof / scope / iat / exp');
+    return fail('malformed_claims', 'token is missing one of sub / principal / delegate / control_proof / iat / exp');
   }
 
   if (nowSeconds > exp + clockToleranceSeconds) {
@@ -232,13 +226,6 @@ export async function verifyDelegation(token: string, options: VerifyOptions): P
       'delegate_mismatch',
       `delegation attests ${JSON.stringify(delegate)}, but the artifact you resolved is ${JSON.stringify(expectedDelegate)}`
     );
-  }
-
-  const grantedScopes = scope as string[];
-  const grantedTrimmed = grantedScopes.map((entry) => entry.trim());
-  const missing = requiredScopes.filter((required) => !grantedTrimmed.includes(required));
-  if (missing.length > 0) {
-    return fail('scope_not_granted', `delegation does not grant: ${missing.join(', ')}`);
   }
 
   // ---------------------------------------------------------------- signature
@@ -292,7 +279,6 @@ export async function verifyDelegation(token: string, options: VerifyOptions): P
     issuer: issuer.issuer,
     principal,
     delegate,
-    scope: grantedScopes,
     controlProof,
     delegationId: sub,
     issuedAt: new Date(iat * 1000),

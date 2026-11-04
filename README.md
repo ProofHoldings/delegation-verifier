@@ -1,8 +1,7 @@
 # @proof-holdings/delegation-verifier
 
 Verify a **Proof of Delegation**: a signed statement that the controller of a domain authorized
-a specific agent artifact — an npm package, a container, an endpoint — for a set of capability
-scopes.
+a specific agent artifact — an npm package, a container, an endpoint.
 
 You do not need an account with anyone to use this. It runs against public surfaces only, and
 it has **no built-in trust list**: you name the issuers you accept.
@@ -18,8 +17,8 @@ Zero runtime dependencies. Node ≥ 18 (or any runtime with WebCrypto, `fetch` a
 
 A verified delegation says exactly one thing:
 
-> The controller of `principal` authorized `delegate` for these scopes, and the issuer checked
-> that control when it signed.
+> The controller of `principal` authorized `delegate`, and the issuer checked that control when
+> it signed.
 
 It is **not** a statement that the artifact is safe, audited, maintained, or endorsed, and it is
 not a review of the business behind the domain. Do not render it as a generic "verified" badge.
@@ -41,7 +40,6 @@ const result = await verifyPublishedDelegation(serverCard, {
   // The artifact YOU resolved — the package you are installing, the endpoint you are calling.
   delegate: { type: 'purl', value: 'pkg:npm/postmark-mcp' },
   expectedPrincipal: 'postmarkapp.com',
-  requiredScopes: ['send-email'],
 });
 
 if (result.valid) {
@@ -190,7 +188,7 @@ because they occur in practice).
 
 | `reason` | `outcome` | Meaning |
 | --- | --- | --- |
-| `invalid_options` | `invalid` | The call is wrong — usually a missing or uncanonicalizable `delegate`. |
+| `invalid_options` | `invalid` | The call is wrong — usually a missing or uncanonicalizable `delegate`, or the `requiredScopes` option, removed in 0.2.0 with the `scope` claim (refused rather than ignored, so no caller reads a valid answer as "my scopes were granted"). |
 | `no_trust_policy` | `invalid` | `trustedIssuers` was empty. There is no default. |
 | `malformed_token` | `invalid` | Not a decodable JWT. |
 | `untrusted_issuer` | `invalid` | Signed by someone you did not name. |
@@ -202,11 +200,10 @@ because they occur in practice).
 | `wrong_key_purpose` | `invalid` | The signing key belongs to another key family than a delegation. |
 | `outside_key_window` | `invalid` | The token's `iat` lies outside the signing key's window (5 minutes of skew allowed). |
 | `token_lifetime_exceeded` | `invalid` | `exp` lies beyond `iat` plus the signing key's `max_token_lifetime`. |
-| `not_a_delegation` / `unsupported_schema` | `invalid` | Wrong token type or a schema major this version does not understand. |
+| `not_a_delegation` / `unsupported_version` | `invalid` | Wrong token type, or a `delegation_schema_version` major other than 2 (a 1.x token, which still carries `scope`, is refused before any network call). |
 | `expired` / `not_yet_valid` / `malformed_claims` | `invalid` | Claim-level rejections. |
 | `principal_mismatch` | `invalid` | Issued by a different domain than you expected. |
 | `delegate_mismatch` | `invalid` | **Attests a different artifact than the one you resolved.** |
-| `scope_not_granted` | `invalid` | Does not grant a scope you required. |
 | `status_uri_untrusted` | `unconfirmed` | The status-list uri in the token is not the issuer's. Not fetched. |
 | `status_unavailable` | `unconfirmed` | Revocation could not be checked. Fail closed. |
 | `revoked` / `suspended` | `invalid` | Withdrawn, or reversibly paused. |

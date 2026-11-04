@@ -1,8 +1,8 @@
 /**
  * @proof-holdings/delegation-verifier — issuer-agnostic verification of Proof of Delegation.
  *
- * A delegation says: the domain in `principal` authorized the artifact in `delegate` for these
- * capability scopes, and the issuer checked that domain's control at issuance. It says nothing
+ * A delegation says: the domain in `principal` authorized the artifact in `delegate`, and the
+ * issuer checked that domain's control at issuance. It says nothing
  * about whether the artifact is safe, audited, or any good.
  *
  * ```ts
@@ -42,7 +42,6 @@ export {
 export type { PointerParseResult, PointerRejection } from './publication.js';
 export {
   canonicalizeDelegate,
-  canonicalizeScopes,
   DelegateIdentifierError,
   DELEGATE_TYPES,
   DELEGATE_MAX_LENGTH,

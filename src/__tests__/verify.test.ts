@@ -181,16 +181,27 @@ describe('claims (SC-4)', () => {
     expect(result.reason).toBe('not_a_delegation');
   });
 
-  it('rejects an unsupported schema major', async () => {
-    const token = await signJwt(delegationClaims({ delegation_schema_version: '2.0' }), key);
+  it('rejects a schema-1.x token, scope and all, as unsupported_version before any fetch', async () => {
+    const token = await signJwt(delegationClaims({ delegation_schema_version: '1.0', scope: ['send-email'] }), key);
+    const net = mockFetch({ [JWKS_URI]: jwksBody(key) });
+
+    const result = await verifyDelegation(token, options({ fetch: net.fetch }));
+
+    expectFailure(result);
+    expect(result.reason).toBe('unsupported_version');
+    expect(net.calls).toEqual([]);
+  });
+
+  it('rejects a later schema major as unsupported_version', async () => {
+    const token = await signJwt(delegationClaims({ delegation_schema_version: '3.0' }), key);
     const result = await verifyDelegation(token, options({ fetch: mockFetch({}).fetch, statusCheck: 'skip' }));
 
     expectFailure(result);
-    expect(result.reason).toBe('unsupported_schema');
+    expect(result.reason).toBe('unsupported_version');
   });
 
   it('accepts a later minor of the same major', async () => {
-    const token = await signJwt(delegationClaims({ delegation_schema_version: '1.4' }), key);
+    const token = await signJwt(delegationClaims({ delegation_schema_version: '2.4' }), key);
     const net = mockFetch({ [JWKS_URI]: jwksBody(key) });
 
     const result = await verifyDelegation(token, options({ fetch: net.fetch, statusCheck: 'skip' }));
@@ -255,7 +266,7 @@ describe('claims (SC-4)', () => {
   });
 
   it('rejects malformed claims', async () => {
-    const token = await signJwt(delegationClaims({ scope: [] }), key);
+    const token = await signJwt(delegationClaims({ control_proof: '' }), key);
 
     const result = await verifyDelegation(token, options({ fetch: mockFetch({}).fetch, statusCheck: 'skip' }));
 
@@ -287,16 +298,29 @@ describe('claims (SC-4)', () => {
     expect(result.valid).toBe(true);
   });
 
-  it('reports scope_not_granted for a scope the delegation does not carry', async () => {
+  it('does not require a scope claim, and does not return one', async () => {
+    const token = await signJwt(delegationClaims(), key);
+    const net = mockFetch({ [JWKS_URI]: jwksBody(key) });
+
+    const result = await verifyDelegation(token, options({ fetch: net.fetch, statusCheck: 'skip' }));
+
+    expect(result.valid).toBe(true);
+    if (result.valid) expect(result.delegation).not.toHaveProperty('scope');
+  });
+
+  // Removed in 0.2.0 with the claim itself. Refused rather than ignored: an untyped caller still
+  // passing it would otherwise believe a requirement was checked.
+  it('refuses the removed requiredScopes option as invalid_options', async () => {
     const token = await signJwt(delegationClaims(), key);
 
     const result = await verifyDelegation(
       token,
-      options({ fetch: mockFetch({}).fetch, statusCheck: 'skip', requiredScopes: ['delete-account'] })
+      options({ fetch: mockFetch({}).fetch, statusCheck: 'skip', requiredScopes: ['send-email'] } as never)
     );
 
     expectFailure(result);
-    expect(result.reason).toBe('scope_not_granted');
+    expect(result.reason).toBe('invalid_options');
+    expect(result.message).toMatch(/requiredScopes/);
   });
 });
 

@@ -2,7 +2,7 @@
  * Public types of the Proof of Delegation reference verifier.
  *
  * The library verifies a delegation token — an attestation that the domain in `principal`
- * authorized the artifact in `delegate` for a set of capability scopes. It attests NOTHING
+ * authorized the artifact in `delegate`. It attests NOTHING
  * about the artifact's quality, safety or the business behind it, and it is not a statement
  * that anyone "verified" the server.
  *
@@ -102,12 +102,6 @@ export interface VerifyOptions {
    */
   expectedPrincipal?: string;
   /**
-   * Scopes the delegation must grant. Compared as EXACT strings against the token's own
-   * `scope` (trimmed only): scope grammar belongs to the issuer, and imposing one issuer's
-   * rules here would make another issuer's grants unaskable.
-   */
-  requiredScopes?: string[];
-  /**
    * `required` (default) — the delegation's status list is checked, and the issuer's status
    * endpoint is asked too whenever the list cannot answer on its own (see `status.ts` for
    * exactly when); anything unreachable fails closed with `status_unavailable`. There is no
@@ -161,14 +155,14 @@ export type FailureReason =
   /** `exp` lies beyond `iat` plus the signing key's `max_token_lifetime`. */
   | 'token_lifetime_exceeded'
   | 'not_a_delegation'
-  | 'unsupported_schema'
+  /** The token's `delegation_schema_version` major is not 2 (a 1.x token carries `scope`). */
+  | 'unsupported_version'
   | 'expired'
   | 'not_yet_valid'
   | 'malformed_claims'
   | 'principal_mismatch'
   /** The token attests some OTHER artifact than the one the caller resolved. */
   | 'delegate_mismatch'
-  | 'scope_not_granted'
   /** The status-list uri in the token does not belong to the trusted issuer. */
   | 'status_uri_untrusted'
   | 'status_unavailable'
@@ -208,7 +202,6 @@ export interface VerifiedDelegation {
   principal: string;
   /** Canonical artifact identifier, byte-equal to what the caller resolved. */
   delegate: string;
-  scope: string[];
   /** Public handle of the domain control proof underneath this delegation. */
   controlProof: string;
   /** Public handle of the delegation itself (`ph_dlg_*` for proof.holdings). */

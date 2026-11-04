@@ -282,47 +282,6 @@ describe('redirects are not followed', () => {
   });
 });
 
-describe('scope requirements are the issuer\'s grammar, not ours', () => {
-  it('accepts a required scope that our own canonicalizer would reject', async () => {
-    // Another issuer's grammar (`mcp:tools/call`) must be ASKABLE — imposing proof.holdings'
-    // kebab-case here would make the requirement unstateable rather than over-constrained.
-    const token = await signJwt(delegationClaims({ scope: ['mcp:tools/call'] }), key);
-    const net = mockFetch({ [JWKS_URI]: jwksBody(key) });
-
-    const result = await verifyDelegation(
-      token,
-      options({ fetch: net.fetch, statusCheck: 'skip', requiredScopes: ['mcp:tools/call'] })
-    );
-
-    expect(result.valid).toBe(true);
-  });
-
-  it('still reports a scope the delegation does not grant', async () => {
-    const token = await signJwt(delegationClaims({ scope: ['mcp:tools/call'] }), key);
-    const net = mockFetch({ [JWKS_URI]: jwksBody(key) });
-
-    const result = await verifyDelegation(
-      token,
-      options({ fetch: net.fetch, statusCheck: 'skip', requiredScopes: ['mcp:resources/read'] })
-    );
-
-    expectFailure(result);
-    expect(result.reason).toBe('scope_not_granted');
-  });
-
-  it('rejects a non-string requiredScopes as a call error', async () => {
-    const token = await signJwt(delegationClaims(), key);
-
-    const result = await verifyDelegation(
-      token,
-      options({ fetch: mockFetch({}).fetch, requiredScopes: [42 as unknown as string] })
-    );
-
-    expectFailure(result);
-    expect(result.reason).toBe('invalid_options');
-  });
-});
-
 describe('JWKS failure is not a forgery signal', () => {
   it('reports jwks_unavailable — not unknown_key — to CONCURRENT callers when the fetch fails', async () => {
     const token = await signJwt(delegationClaims(), key);
