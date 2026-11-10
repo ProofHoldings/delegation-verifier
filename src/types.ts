@@ -208,7 +208,22 @@ export interface VerifiedDelegation {
   delegationId: string;
   issuedAt: Date;
   expiresAt: Date;
+  /**
+   * Where the issuer serves the CURRENT version of this delegation's token (the token's `renewal_url`
+   * claim), so a copy that has expired can be followed to its renewal. Present only when it is https
+   * and on the trusted issuer's own origin — the origin of its `jwksUri` or `statusEndpoint`, or one
+   * of its `statusListOrigins`, the rule the status-list uri follows — so a token can never send a
+   * verifier to a host it names itself. Never fetched here: fetch it, then verify what it serves with
+   * `verifyDelegation` and `isRenewalOf`. `null` when the token carries none or it was refused.
+   */
+  renewalUrl: string | null;
+  /** Why a `renewal_url` the token carried was refused; absent when it was accepted or there was none. */
+  renewalUrlRejected?: RenewalUrlRejection;
 }
+
+/** `not_https`: another scheme. `off_origin`: not an origin of the trusted issuer. `malformed`: not a URL, or one
+ * with userinfo, a backslash, whitespace or a non-printable-ASCII character (strings URL parsers disagree on). */
+export type RenewalUrlRejection = 'not_https' | 'off_origin' | 'malformed';
 
 export interface VerificationSuccess {
   valid: true;
@@ -247,6 +262,15 @@ export interface VerificationFailure {
   cacheAgeSeconds?: number | null;
   /** `jwks_stale` only: what to refetch, and the exported function that does it. */
   refreshHint?: { jwksUri: string; method: 'refreshJwks' };
+  /**
+   * `expired` only: the token's `renewal_url`, under the rule `VerifiedDelegation.renewalUrl` states —
+   * an expired copy is the case the claim exists for. Read from claims whose signature is not checked
+   * at this point, which the origin rule makes safe: it can only name the trusted issuer, and whatever
+   * it serves is verified in full. `null` when the token carries none or it was refused.
+   */
+  renewalUrl?: string | null;
+  /** `expired` only: why a `renewal_url` the token carried was refused. */
+  renewalUrlRejected?: RenewalUrlRejection;
 }
 
 export type VerificationResult = VerificationSuccess | VerificationFailure;

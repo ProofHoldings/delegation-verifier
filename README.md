@@ -1,5 +1,7 @@
 # @proof-holdings/delegation-verifier
 
+[![Proof of Delegation](https://proof.holdings/badge/npm/@proof-holdings/delegation-verifier)](https://proof.holdings/npm/@proof-holdings/delegation-verifier)
+
 Verify a **Proof of Delegation**: a signed statement that the controller of a domain authorized
 a specific agent artifact — an npm package, a container, an endpoint.
 
@@ -90,7 +92,9 @@ presented as *"X says it authorized this"*, never as *verified*.
    required claim set.
 4. **Principal** — pinned to the domain you expect, when you supply one. See above: without it
    the answer says who *claims* the artifact, not that the right party did.
-5. **Delegate** — canonicalized and compared byte-for-byte with the identity you resolved.
+5. **Delegate** — the token's `delegate` and the identity you resolved are both canonicalized
+   by the same per-registry rule, then compared exactly (`delegateMatches`): npm, PyPI and Composer
+   names ignore case (PyPI also folds `-`, `_`, `.`), a Go module path and a URL path keep theirs.
 6. **Status** — two channels, both authenticated, asked in order:
    - the IETF Token Status List the token points at (`status.status_list`), whose uri is
      refused unless it belongs to your trusted issuer, and whose signature is checked against
@@ -176,6 +180,48 @@ Exported alongside `verifyDelegation`:
   applied tombstones; `null` for a key set this process has never used.
 - `DEFAULT_MAX_JWKS_AGE_MS`, `MAX_JWKS_AGE_CAP_MS` — to validate your own configuration against the
   same bounds.
+
+## Renewed delegations
+
+An issuer may renew a delegation in place: the same delegation re-signed with a later `exp`, keeping its
+handle, `jti`, `principal` and `delegate`. A published copy then goes stale without being withdrawn, and
+`verifyDelegation` answers it `expired` on its own date. To follow the renewal, fetch the delegation's
+current token from its issuer yourself, check it with `isRenewalOf`, and verify it like any other token.
+
+Where to fetch it is in the token: a proof.holdings delegation carries a `renewal_url` claim, the address
+its current version is served at (`https://api.proof.holdings/api/v1/proofs/delegation-token/<handle>`),
+the same for every token of the delegation. A verified result passes it on as `delegation.renewalUrl` only
+when it is https and on an origin of the trusted issuer — its `jwksUri`, its `statusEndpoint`, or one of
+its `statusListOrigins`, the rule the status-list uri follows — so a token cannot send you to a host it
+names itself. A refused claim does not fail the delegation: `renewalUrl` is `null` and
+`renewalUrlRejected` says why (`not_https`, `off_origin`, or `malformed` for a claim that is not a URL, or
+carries userinfo, a backslash, whitespace or a character outside printable ASCII — strings URL parsers
+disagree on); the URL passed on is the parsed one's serialization, never the claim's own text;
+`renewalUrl` is `null` with no reason for a token that carries none, such as one issued before the
+claim existed. An `expired` failure carries the same two fields, under the same rule — an expired copy is
+the case the claim exists for; no other failure does. The package never fetches it. Fetch it with
+`redirect: 'error'`, as the status-list fetch does: the path is the token's to choose, and on an expired copy
+the signature has not been checked yet, so a redirect anywhere on the issuer's origin must not take you off it:
+
+```ts
+const found = await verifyDelegation(foundToken, { trustedIssuers, delegate });
+if (!found.valid && found.reason === 'expired' && found.renewalUrl) {
+  const { token: currentToken } = await (await fetch(found.renewalUrl, { redirect: 'error' })).json();
+  const check = isRenewalOf(foundToken, currentToken);
+  if (check.renewal) {
+    const result = await verifyDelegation(currentToken, {
+      trustedIssuers, // the SAME trusted issuer as for the found token
+      delegate,
+      expectedPrincipal: principalOfTheFoundToken,
+    });
+  }
+}
+```
+
+`isRenewalOf` compares claims only and makes no request: `{ renewal: true }` is not a verification. It
+follows one hop — the candidate is compared with the token you found — and refuses another `iss`, handle,
+`jti`, `principal` or `delegate`, an `iat` before the found token's, and an `exp` that is not later
+(`renewal: false` with a `reason`).
 
 ## Failure reasons
 

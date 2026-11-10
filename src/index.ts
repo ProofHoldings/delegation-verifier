@@ -42,6 +42,7 @@ export {
 export type { PointerParseResult, PointerRejection } from './publication.js';
 export {
   canonicalizeDelegate,
+  delegateMatches,
   DelegateIdentifierError,
   DELEGATE_TYPES,
   DELEGATE_MAX_LENGTH,
@@ -57,6 +58,12 @@ export {
 } from './jwks.js';
 export type { JwksDiagnostics, SupportedAlgorithm } from './jwks.js';
 export { readStatusSlot } from './status.js';
+/**
+ * Renewal: is a token the issuer serves now a renewal of the expired one you found? Claims only — fetch
+ * the candidate yourself, then verify it with `verifyDelegation` against the same trusted issuer.
+ */
+export { isRenewalOf, renewalVerdict, RENEWAL_CLOCK_TOLERANCE_SECONDS } from './renewal.js';
+export type { RenewalCheck, RenewalRejection, RenewalToken } from './renewal.js';
 export { classifyFailureReason } from './types.js';
 export type {
   DelegateInput,

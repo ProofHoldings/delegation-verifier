@@ -10,6 +10,11 @@
  *
  * It is copied rather than imported for the reason the package exists at all: a gateway
  * verifying someone's delegation must not have to install the issuer's backend.
+ *
+ * Comparison: BOTH sides are canonicalized, then compared exactly — the identity the caller
+ * resolved through `canonicalizeDelegate`, a delegate found in a token through `delegateMatches` —
+ * so a spelling the registry treats as the same name matches. Lineage checks (a renewal keeps the
+ * same signed delegate) stay byte-exact and do not canonicalize.
  */
 
 import type { DelegateInput, DelegateType } from './types.js';
@@ -38,6 +43,28 @@ export function canonicalizeDelegate(input: DelegateInput): string {
   if (input.type === 'purl') return canonicalizePurl(input.value);
   if (input.type === 'url') return canonicalizeUrl(input.value);
   throw new DelegateIdentifierError(`unknown delegate type: ${String(input.type)}`);
+}
+
+/**
+ * Does a delegate FOUND somewhere we do not control (a token's `delegate` claim, a stored row)
+ * name the artifact whose canonical form is `expectedCanonical`? The found value is
+ * canonicalized with the same per-registry rule before the exact comparison, so a spelling the
+ * registry treats as the same name matches (Composer, npm and PyPI ignore case; PyPI also
+ * folds `-`, `_`, `.`) while one it treats as different does not (Go module case, URL path
+ * case). A value that cannot be canonicalized is a mismatch, never an exception.
+ *
+ * Lineage checks (a renewal keeps the SAME signed delegate) stay byte-exact and do not use this.
+ */
+export function delegateMatches(found: unknown, expectedCanonical: string): boolean {
+  if (typeof found !== 'string' || found.length === 0) return false;
+  // The canonicalizer trims and reads `pkg:` case-insensitively; the type test must agree.
+  const type: DelegateType = /^\s*pkg:/i.test(found) ? 'purl' : 'url';
+  try {
+    return canonicalizeDelegate({ type, value: found }) === expectedCanonical;
+  } catch (err) {
+    if (err instanceof DelegateIdentifierError) return false;
+    throw err;
+  }
 }
 
 function canonicalizePurl(value: string): string {
@@ -72,12 +99,16 @@ function canonicalizePurl(value: string): string {
   }
 
   // Per-type case rules (purl-spec: type is case-insensitive and canonically lowercase; name
-  // rules are per-type). npm and pypi are lowercase-only registries; pypi additionally treats
-  // `_` and `-` as equivalent, canonically `-` (PEP 503).
+  // rules are per-type). npm and pypi are lowercase-only registries; pypi additionally
+  // folds every run of `-`, `_` and `.` to one `-` (PEP 503 normalized names).
   if (type === 'npm') {
     rest = segments.map((segment) => segment.toLowerCase()).join('/');
   } else if (type === 'pypi') {
-    rest = segments.map((segment) => segment.toLowerCase().replace(/_/g, '-')).join('/');
+    rest = segments.map((segment) => segment.toLowerCase().replace(/[-_.]+/g, '-')).join('/');
+  } else if (type === 'composer') {
+    // Packagist names are lowercase-only and purl-spec lowercases composer vendor and name.
+    // golang deliberately falls through: a Go module path is case-sensitive.
+    rest = segments.map((segment) => segment.toLowerCase()).join('/');
   } else {
     rest = segments.join('/');
   }

@@ -356,6 +356,56 @@ describe('delegate binding — requirement (a) (SC-5)', () => {
     expect(net.calls).toEqual([]);
   });
 
+  it("canonicalizes the TOKEN's delegate too: a mixed-case Composer token verifies against the lowercase identity", async () => {
+    // Minted before Composer names were lowercased (PR #712): the signed claim keeps its spelling.
+    const token = await signJwt(delegationClaims({ delegate: 'pkg:composer/Foo/Bar' }), key);
+    const net = mockFetch({ [JWKS_URI]: jwksBody(key) });
+
+    const result = await verifyDelegation(
+      token,
+      options({ fetch: net.fetch, statusCheck: 'skip', delegate: { type: 'purl', value: 'pkg:composer/foo/bar' } })
+    );
+
+    expect(result.valid).toBe(true);
+    if (result.valid) expect(result.delegation.delegate).toBe('pkg:composer/Foo/Bar');
+  });
+
+  it("folds a PyPI token's separators the same way as the resolved identity", async () => {
+    const token = await signJwt(delegationClaims({ delegate: 'pkg:pypi/zope_interface' }), key);
+    const net = mockFetch({ [JWKS_URI]: jwksBody(key) });
+
+    const result = await verifyDelegation(
+      token,
+      options({ fetch: net.fetch, statusCheck: 'skip', delegate: { type: 'purl', value: 'pkg:pypi/zope.interface' } })
+    );
+
+    expect(result.valid).toBe(true);
+  });
+
+  it('keeps Go module case: a token for github.com/Foo/bar does not verify against github.com/foo/bar', async () => {
+    const token = await signJwt(delegationClaims({ delegate: 'pkg:golang/github.com/Foo/bar' }), key);
+    const net = mockFetch({ [JWKS_URI]: jwksBody(key) });
+
+    const result = await verifyDelegation(
+      token,
+      options({ fetch: net.fetch, statusCheck: 'skip', delegate: { type: 'purl', value: 'pkg:golang/github.com/foo/bar' } })
+    );
+
+    expectFailure(result);
+    expect(result.reason).toBe('delegate_mismatch');
+    expect(net.calls).toEqual([]);
+  });
+
+  it("answers delegate_mismatch — never throws — for a token delegate that does not canonicalize", async () => {
+    const token = await signJwt(delegationClaims({ delegate: 'pkg:npm/postmark-mcp@1.0.0' }), key);
+    const net = mockFetch({ [JWKS_URI]: jwksBody(key) });
+
+    const result = await verifyDelegation(token, options({ fetch: net.fetch, statusCheck: 'skip' }));
+
+    expectFailure(result);
+    expect(result.reason).toBe('delegate_mismatch');
+  });
+
   it('canonicalizes the caller-supplied delegate before comparing', async () => {
     const token = await signJwt(delegationClaims(), key);
     const net = mockFetch({ [JWKS_URI]: jwksBody(key) });
@@ -705,5 +755,120 @@ describe.skipIf(!HAS_SHARED_FIXTURES)('the shared status-list origin fixture', (
     } else {
       expect(listRequests).toEqual([]);
     }
+  });
+});
+
+/**
+ * B.11f: a delegation token may carry `renewal_url`, where the current version of its token is served.
+ * The verifier passes it on only when it is https and on the trusted issuer's own origin (the rule the
+ * status-list uri follows); otherwise the delegation still verifies and the caller is told why it got
+ * no pointer. The package never fetches it.
+ */
+describe('renewal_url (B.11f)', () => {
+  const PULL = 'https://issuer.test/api/v1/proofs/delegation-token/ph_dlg_00000000000000000000000000000001';
+
+  async function verified(claims: Record<string, unknown>, issuer: TrustedIssuer = trustedIssuer) {
+    const token = await signJwt(delegationClaims(claims), key);
+    const net = mockFetch({ [JWKS_URI]: jwksBody(key) });
+    const result = await verifyDelegation(token, options({ fetch: net.fetch, statusCheck: 'skip', trustedIssuers: [issuer] }));
+    if (!result.valid) throw new Error(`expected a valid delegation, got ${result.reason}`);
+    return { delegation: result.delegation, calls: net.calls };
+  }
+
+  it('passes on an https URL on the issuer origin, and never fetches it', async () => {
+    const { delegation, calls } = await verified({ renewal_url: PULL });
+    expect(delegation.renewalUrl).toBe(PULL);
+    expect(delegation.renewalUrlRejected).toBeUndefined();
+    expect(calls).not.toContain(PULL);
+  });
+
+  it('answers null with no reason when the token carries none', async () => {
+    const { delegation } = await verified({});
+    expect(delegation.renewalUrl).toBeNull();
+    expect(delegation.renewalUrlRejected).toBeUndefined();
+  });
+
+  it('refuses a URL off the issuer origin, still verifying the delegation (the rest: the shared fixture below)', async () => {
+    const { delegation } = await verified({ renewal_url: 'https://elsewhere.test/api/v1/proofs/delegation-token/ph_dlg_00000000000000000000000000000001' });
+    expect(delegation.renewalUrl).toBeNull();
+    expect(delegation.renewalUrlRejected).toBe('off_origin');
+  });
+
+  it('carries the pointer on an EXPIRED copy too — the case the claim exists for', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const token = await signJwt(delegationClaims({ renewal_url: PULL, iat: now - 7200, exp: now - 3600 }), key);
+    const net = mockFetch({ [JWKS_URI]: jwksBody(key) });
+    const result = await verifyDelegation(token, options({ fetch: net.fetch, statusCheck: 'skip' }));
+    expectFailure(result);
+    expect(result.reason).toBe('expired');
+    expect(result.renewalUrl).toBe(PULL);
+    expect(result.renewalUrlRejected).toBeUndefined();
+    expect(net.calls).not.toContain(PULL);
+  });
+
+  it('carries the pointer when the ISSUER reports the delegation expired, though the token’s own exp is ahead', async () => {
+    const token = await signJwt(delegationClaims({ renewal_url: PULL }), key);
+    const net = mockFetch({ [JWKS_URI]: jwksBody(key), [STATUS_ENDPOINT]: { json: { valid: false, reason: 'expired' } } });
+    const result = await verifyDelegation(token, options({ fetch: net.fetch }));
+    expectFailure(result);
+    expect([result.reason, result.renewalUrl, result.renewalUrlRejected]).toEqual(['expired', PULL, undefined]);
+    expect(net.calls).toContain(STATUS_ENDPOINT);
+    expect(net.calls).not.toContain(PULL);
+  });
+
+  it('applies the same rule to an expired copy: an off-origin pointer is withheld, with its reason', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const token = await signJwt(delegationClaims({ renewal_url: 'https://elsewhere.test/x', iat: now - 7200, exp: now - 3600 }), key);
+    const result = await verifyDelegation(token, options({ fetch: mockFetch({ [JWKS_URI]: jwksBody(key) }).fetch, statusCheck: 'skip' }));
+    expectFailure(result);
+    expect([result.reason, result.renewalUrl, result.renewalUrlRejected]).toEqual(['expired', null, 'off_origin']);
+  });
+
+  it('carries no pointer on any other failure: a delegation from an untrusted issuer gets none', async () => {
+    const token = await signJwt(delegationClaims({ renewal_url: PULL, iss: 'someone.else' }), key);
+    const result = await verifyDelegation(token, options({ fetch: mockFetch({}).fetch }));
+    expectFailure(result);
+    expect(result.reason).toBe('untrusted_issuer');
+    expect('renewalUrl' in result).toBe(false);
+  });
+
+  // Every reason's cases live in `sdks/shared/fixtures/renewal_url.json` (below, monorepo only).
+
+});
+
+describe.skipIf(!HAS_SHARED_FIXTURES)('the shared renewal_url fixture (B.11f)', () => {
+  const fixture = (
+    HAS_SHARED_FIXTURES
+      ? JSON.parse(readFileSync(new URL('renewal_url.json', SHARED_FIXTURES), 'utf8'))
+      : { jwks_origin: 'https://fixture.invalid', status_endpoint: 'https://fixture.invalid/v', status_list_origins: [], cases: [] }
+  ) as {
+    jwks_origin: string;
+    status_endpoint: string;
+    status_list_origins: string[];
+    cases: Array<{ name: string; renewal_url?: unknown; renewalUrl: string | null; renewalUrlRejected: string | null }>;
+  };
+  const jwksUri = `${fixture.jwks_origin}/.well-known/jwks.json`;
+  const issuer: TrustedIssuer = {
+    issuer: ISSUER,
+    jwksUri,
+    statusEndpoint: fixture.status_endpoint,
+    statusListOrigins: fixture.status_list_origins,
+  };
+
+  it('has every case the rule needs', () => {
+    expect(new Set(fixture.cases.map((c) => c.renewalUrlRejected))).toEqual(new Set([null, 'not_https', 'off_origin', 'malformed']));
+  });
+
+  it.each(fixture.cases.map((c) => [c.name, c] as const))('%s', async (_name, c) => {
+    const claims = 'renewal_url' in c ? { renewal_url: c.renewal_url } : {};
+    const token = await signJwt(delegationClaims(claims), key);
+    const net = mockFetch({ [jwksUri]: jwksBody(key) });
+    const result = await verifyDelegation(token, options({ fetch: net.fetch, statusCheck: 'skip', trustedIssuers: [issuer] }));
+    if (!result.valid) throw new Error(`expected a valid delegation, got ${result.reason}`);
+    expect({ renewalUrl: result.delegation.renewalUrl, renewalUrlRejected: result.delegation.renewalUrlRejected ?? null }).toEqual({
+      renewalUrl: c.renewalUrl,
+      renewalUrlRejected: c.renewalUrlRejected,
+    });
+    expect(net.calls).toEqual([jwksUri]);
   });
 });

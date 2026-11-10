@@ -66,6 +66,12 @@ export function extractDelegationPublications(card: unknown): FoundPublication[]
     });
   }
 
+  // composer.json: Packagist serves `extra` as written (top-level `_meta` it does not serve).
+  const extra = card.extra;
+  if (isRecord(extra) && extra[DELEGATION_META_KEY] !== undefined) {
+    found.push({ location: `extra["${DELEGATION_META_KEY}"]`, value: extra[DELEGATION_META_KEY] });
+  }
+
   return found;
 }
 

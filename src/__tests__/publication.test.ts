@@ -6,6 +6,7 @@ import {
   extractDelegationPublications,
   verifyPublishedDelegation,
 } from '../publication.js';
+import { canonicalizeDelegate } from '../delegate.js';
 import { resetJwksCache } from '../jwks.js';
 import { readStatusSlot } from '../status.js';
 import type { TrustedIssuer } from '../types.js';
@@ -59,6 +60,14 @@ describe('extractDelegationPublications (SC-8)', () => {
     expect(extractDelegationPublications(card)).toEqual([
       { location: 'capabilities.extensions[1]', value: { token: 'tok' } },
     ]);
+  });
+
+  it("reads a composer.json's `extra` carrier", () => {
+    expect(extractDelegationPublications({ name: 'acme/tool', extra: { [DELEGATION_META_KEY]: { token: 'tok' } } })).toEqual([
+      { location: `extra["${DELEGATION_META_KEY}"]`, value: { token: 'tok' } },
+    ]);
+    expect(extractDelegationPublications({ extra: { 'branch-alias': {} } })).toEqual([]);
+    expect(extractDelegationPublications({ extra: [DELEGATION_META_KEY] })).toEqual([]);
   });
 
   it('ignores a bare top-level key — no carrier reads it', () => {
@@ -187,5 +196,20 @@ describe('readStatusSlot byte order (SC-7)', () => {
 
   it('rejects a bits value that is not a power-of-two divisor of 8', () => {
     expect(readStatusSlot(new Uint8Array([0]), 0, 3)).toBeNull();
+  });
+});
+
+describe('canonicalizeDelegate — per-type case rules', () => {
+  it('lowercases a Composer vendor and name, as Packagist and purl-spec do', () => {
+    expect(canonicalizeDelegate({ type: 'purl', value: 'pkg:composer/Proof-Holdings/SDK' })).toBe('pkg:composer/proof-holdings/sdk');
+  });
+
+  it('keeps a Go module path byte for byte: another case is another module', () => {
+    expect(canonicalizeDelegate({ type: 'purl', value: 'pkg:golang/github.com/ProofHoldings/sdk-go' })).toBe(
+      'pkg:golang/github.com/ProofHoldings/sdk-go'
+    );
+    expect(canonicalizeDelegate({ type: 'purl', value: 'pkg:golang/github.com/proofholdings/sdk-go' })).not.toBe(
+      'pkg:golang/github.com/ProofHoldings/sdk-go'
+    );
   });
 });

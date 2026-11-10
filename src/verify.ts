@@ -7,7 +7,7 @@
  * worth asking the issuer about.
  */
 
-import { canonicalizeDelegate, DelegateIdentifierError } from './delegate.js';
+import { canonicalizeDelegate, delegateMatches, DelegateIdentifierError } from './delegate.js';
 import {
   DEFAULT_MAX_JWKS_AGE_MS,
   isSupportedAlgorithm,
@@ -17,7 +17,7 @@ import {
 } from './jwks.js';
 import type { KeySetOptions } from './jwks.js';
 import { parseJwt } from './jwt.js';
-import { checkDelegationStatus } from './status.js';
+import { checkDelegationStatus, allowedStatusOrigins } from './status.js';
 import { classifyFailureReason } from './types.js';
 import type {
   FailureReason,
@@ -26,6 +26,7 @@ import type {
   TrustedIssuer,
   VerificationFailure,
   VerificationResult,
+  VerifiedDelegation,
   VerifyOptions,
 } from './types.js';
 
@@ -41,7 +42,7 @@ const DEFAULT_TIMEOUT_MS = 5_000;
 function fail(
   reason: FailureReason,
   message: string,
-  extra: Pick<VerificationFailure, 'pullHint' | 'cacheAgeSeconds' | 'refreshHint'> = {}
+  extra: Pick<VerificationFailure, 'pullHint' | 'cacheAgeSeconds' | 'refreshHint' | 'renewalUrl' | 'renewalUrlRejected'> = {}
 ): VerificationResult {
   return { valid: false, reason, outcome: classifyFailureReason(reason), message, ...extra };
 }
@@ -203,7 +204,7 @@ export async function verifyDelegation(token: string, options: VerifyOptions): P
   }
 
   if (nowSeconds > exp + clockToleranceSeconds) {
-    return fail('expired', 'delegation expired');
+    return fail('expired', 'delegation expired', renewalPointer(claims.renewal_url, issuer));
   }
   if (nowSeconds + clockToleranceSeconds < iat) {
     return fail('not_yet_valid', 'delegation is not valid yet (iat is in the future)');
@@ -220,8 +221,10 @@ export async function verifyDelegation(token: string, options: VerifyOptions): P
 
   // Requirement (a) of the design: the token is a bearer artifact, so this comparison — against
   // an identity the CALLER resolved — is what stops a genuine token being copied into another
-  // package's card.
-  if (delegate !== expectedDelegate) {
+  // package's card. The token's own `delegate` is canonicalized by the same per-registry rule
+  // first: a token minted before a canonicalization change (a mixed-case Composer name, a dotted
+  // PyPI name) still names the same artifact. A value that does not canonicalize is a mismatch.
+  if (!delegateMatches(delegate, expectedDelegate)) {
     return fail(
       'delegate_mismatch',
       `delegation attests ${JSON.stringify(delegate)}, but the artifact you resolved is ${JSON.stringify(expectedDelegate)}`
@@ -283,6 +286,7 @@ export async function verifyDelegation(token: string, options: VerifyOptions): P
     delegationId: sub,
     issuedAt: new Date(iat * 1000),
     expiresAt: new Date(exp * 1000),
+    ...renewalPointer(claims.renewal_url, issuer),
   };
   // See `VerificationSuccess.principalChecked`: an issuer binds `delegate` to nothing, so a
   // delegation naming someone else's artifact is a normal thing for any domain to mint. The
@@ -313,7 +317,7 @@ export async function verifyDelegation(token: string, options: VerifyOptions): P
     case 'suspended':
       return fail('suspended', status.message);
     case 'expired':
-      return fail('expired', status.message);
+      return fail('expired', status.message, renewalPointer(claims.renewal_url, issuer));
     case 'unknown':
       return fail('unknown_delegation', status.message);
     case 'untrusted_uri':
@@ -322,4 +326,28 @@ export async function verifyDelegation(token: string, options: VerifyOptions): P
       // Fail CLOSED: an unchecked revocation channel is not evidence of validity.
       return fail('status_unavailable', status.message);
   }
+}
+
+/**
+ * The token's `renewal_url`, judged by the rule the status-list uri follows (`allowedStatusOrigins`):
+ * https, on an origin of the trusted issuer. A refused one never fails the delegation — the claim is the
+ * issuer's own, signed — it only withholds the pointer and says why.
+ */
+function renewalPointer(raw: unknown, issuer: TrustedIssuer): Pick<VerifiedDelegation, 'renewalUrl' | 'renewalUrlRejected'> {
+  if (raw === undefined) return { renewalUrl: null };
+  // Printable ASCII with no backslash, and no userinfo: URL parsers disagree on anything else (WHATWG reads
+  // `https://a.example\@b.example/` as host a.example, an RFC 3986 parser as b.example), and the origin
+  // checked here must be the host every consumer goes to.
+  if (typeof raw !== 'string' || !/^[\x21-\x5b\x5d-\x7e]+$/.test(raw)) return { renewalUrl: null, renewalUrlRejected: 'malformed' };
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return { renewalUrl: null, renewalUrlRejected: 'malformed' };
+  }
+  if (url.username !== '' || url.password !== '') return { renewalUrl: null, renewalUrlRejected: 'malformed' };
+  if (url.protocol !== 'https:') return { renewalUrl: null, renewalUrlRejected: 'not_https' };
+  if (!allowedStatusOrigins(issuer).includes(url.origin)) return { renewalUrl: null, renewalUrlRejected: 'off_origin' };
+  // The parsed URL's serialization, not the claim's text: what was checked is what is passed on.
+  return { renewalUrl: url.href };
 }
