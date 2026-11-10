@@ -320,6 +320,8 @@ export async function verifyDelegation(token: string, options: VerifyOptions): P
       return fail('expired', status.message, renewalPointer(claims.renewal_url, issuer));
     case 'unknown':
       return fail('unknown_delegation', status.message);
+    case 'test_environment':
+      return fail('test_environment', status.message);
     case 'untrusted_uri':
       return fail('status_uri_untrusted', status.message);
     case 'unavailable':

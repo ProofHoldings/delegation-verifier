@@ -254,6 +254,7 @@ because they occur in practice).
 | `status_unavailable` | `unconfirmed` | Revocation could not be checked. Fail closed. |
 | `revoked` / `suspended` | `invalid` | Withdrawn, or reversibly paused. |
 | `unknown_delegation` | `invalid` | The issuer has no record of it — distinct from "could not answer". |
+| `test_environment` | `invalid` | The issuer reports it was issued in test mode, where a verification completes without a real check — a refusal, not "could not answer". |
 | `no_publication` / `multiple_publications` | `invalid` | The card carries no delegation, or several different ones. |
 
 ### Why the status endpoint is not always called, and what that leaves uncovered
@@ -280,6 +281,11 @@ without capping the reissue to cover it — but a control shortened before that 
 reissue that hit its own rare fail-open path, can still leave a delegation whose list bit and own
 `exp` claim both read fine while its issuer would answer `expired`. This is a known, accepted trade-off — not
 silently assumed away.
+
+The endpoint is also where `test_environment` comes from: proof.holdings answers it for a delegation issued in
+test mode, and packs that delegation's list slot as `3`, a value this verifier reads as no answer, so the
+endpoint is asked. That holds for a list built after the token was issued. A list built before it reads the
+slot as `0`, so for up to about two minutes after issuance a test-mode delegation can verify as valid.
 
 ### One thing a failure reason is not
 

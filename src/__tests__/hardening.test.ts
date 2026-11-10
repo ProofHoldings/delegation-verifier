@@ -121,6 +121,16 @@ describe('issuer answers that are not withdrawals', () => {
     expect(result.reason).toBe('unknown_delegation');
   });
 
+  it('refuses a delegation the issuer reports issued in test mode — a verdict, not "could not check"', async () => {
+    // The body proof.holdings answers for a delegation minted in test mode, where `test-verify`
+    // completes a verification with no real check (h-fix-test-mode-trust-isolation).
+    const result = await withEndpointAnswer({ valid: false, token_type: 'delegation', reason: 'test_environment' });
+
+    expectFailure(result);
+    expect(result.reason).toBe('test_environment');
+    expect(result.outcome).toBe('invalid');
+  });
+
   it('reports expired distinctly from revoked', async () => {
     const result = await withEndpointAnswer({ valid: false, reason: 'expired' });
 

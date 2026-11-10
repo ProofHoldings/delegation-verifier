@@ -15,7 +15,9 @@
  *      status-list claim at all, and cascade-derived EXPIRY — the control's own `expires_at`
  *      is never packed into the bit (only revoked/suspended are), so a delegation whose
  *      effective lifetime is capped by an expired control, while its own list bit and its own
- *      `exp` claim both still read fine, is only visible through this endpoint.
+ *      `exp` claim both still read fine, is only visible through this endpoint. It is also
+ *      where `test_environment` comes from: proof.holdings packs a test-mode delegation's slot
+ *      as 3, which reads here as no answer, and answers `test_environment` on this endpoint.
  *
  *      `h-fix-control-proof-reissue-shorter` closes the write side of that expiry gap going
  *      forward — a delegation can no longer be minted longer than its control, and reissuing a
@@ -52,6 +54,8 @@ export type StatusOutcome =
   | { state: 'expired'; message: string }
   /** The issuer has no record of the delegation at all. */
   | { state: 'unknown'; message: string }
+  /** The issuer says this delegation was issued in test mode — never valid outside it. */
+  | { state: 'test_environment'; message: string }
   | { state: 'untrusted_uri'; message: string }
   | { state: 'unavailable'; message: string };
 
@@ -270,7 +274,7 @@ async function checkStatusList(params: {
 /**
  * Ask the issuer's status endpoint about this exact token. Contract:
  * `POST` `{"proof_token": "<jwt>"}` → JSON with at least `{"valid": boolean}` and optionally
- * `{"reason": "revoked" | "suspended" | "expired" | ...}`.
+ * `{"reason": "revoked" | "suspended" | "expired" | "unknown_delegation" | "test_environment" | ...}`.
  */
 async function checkStatusEndpoint(params: {
   token: string;
@@ -331,6 +335,8 @@ async function checkStatusEndpoint(params: {
       return { state: 'expired', message: 'the issuer reports this delegation expired' };
     case 'unknown_delegation':
       return { state: 'unknown', message: 'the issuer has no record of this delegation' };
+    case 'test_environment':
+      return { state: 'test_environment', message: 'the issuer reports this delegation was issued in test mode' };
     default:
       return {
         state: 'unavailable',

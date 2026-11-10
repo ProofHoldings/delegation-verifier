@@ -170,6 +170,8 @@ export type FailureReason =
   | 'suspended'
   /** The issuer has no record of this delegation — distinct from "it could not answer". */
   | 'unknown_delegation'
+  /** The issuer reports the delegation was issued in test mode — a refusal, not "could not check". */
+  | 'test_environment'
   /** Card carries no delegation publication. */
   | 'no_publication'
   /** Card carries several publications — ambiguous, refused rather than guessed. */
