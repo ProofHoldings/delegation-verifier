@@ -19,6 +19,8 @@
  */
 
 export { verifyDelegation } from './verify.js';
+/** Proof tokens — the issuer's other family: control of a domain, an email, a handle… */
+export { verifyProofToken } from './proof.js';
 export {
   verifyPublishedDelegation,
   extractDelegationPublications,
@@ -70,6 +72,13 @@ export type {
   DelegateType,
   FailureOutcome,
   FailureReason,
+  ProofExpectation,
+  ProofFailureReason,
+  ProofVerificationFailure,
+  ProofVerificationResult,
+  ProofVerificationSuccess,
+  ProofVerifyOptions,
+  VerifiedProof,
   FetchLike,
   JwksEvent,
   JwksEventType,

@@ -15,7 +15,7 @@ import {
   resolveVerificationKeys,
   verifyWithCandidates,
 } from './jwks.js';
-import type { KeySetOptions } from './jwks.js';
+import type { KeySetOptions, SupportedAlgorithm } from './jwks.js';
 import { parseJwt } from './jwt.js';
 import { checkDelegationStatus, allowedStatusOrigins } from './status.js';
 import { classifyFailureReason } from './types.js';
@@ -36,8 +36,8 @@ import type {
  */
 const SUPPORTED_SCHEMA_MAJOR = '2';
 
-const DEFAULT_CLOCK_TOLERANCE_SECONDS = 5;
-const DEFAULT_TIMEOUT_MS = 5_000;
+export const DEFAULT_CLOCK_TOLERANCE_SECONDS = 5;
+export const DEFAULT_TIMEOUT_MS = 5_000;
 
 function fail(
   reason: FailureReason,
@@ -47,7 +47,7 @@ function fail(
   return { valid: false, reason, outcome: classifyFailureReason(reason), message, ...extra };
 }
 
-function findTrustedIssuer(issuers: TrustedIssuer[], iss: unknown): TrustedIssuer | undefined {
+export function findTrustedIssuer(issuers: TrustedIssuer[], iss: unknown): TrustedIssuer | undefined {
   if (typeof iss !== 'string' || iss.length === 0) return undefined;
   return issuers.find((candidate) => candidate.issuer === iss);
 }
@@ -66,7 +66,7 @@ function isHttpsUrl(value: unknown): boolean {
  * just the JWKS: `statusEndpoint` receives the whole delegation token in a POST body, and both
  * it and `statusListOrigins` widen the set of origins a token may point the verifier at.
  */
-function isValidIssuerEntry(entry: unknown): entry is TrustedIssuer {
+export function isValidIssuerEntry(entry: unknown): entry is TrustedIssuer {
   if (typeof entry !== 'object' || entry === null) return false;
   const candidate = entry as Partial<TrustedIssuer>;
   if (typeof candidate.issuer !== 'string' || candidate.issuer.length === 0) return false;
@@ -81,6 +81,96 @@ function isValidIssuerEntry(entry: unknown): entry is TrustedIssuer {
 
 function normalizePrincipal(value: string): string {
   return value.trim().toLowerCase();
+}
+
+export const NO_TRUST_POLICY_MESSAGE =
+  'trustedIssuers is empty: this verifier has no built-in trust list, so the caller must name the issuers it accepts (each with an https jwksUri)';
+
+/** The key-set options both checks accept, validated alike; the problem, or null when there is none. */
+export function keySetOptionsProblem(options: Pick<VerifyOptions, 'maxJwksAgeMs' | 'keySetStore' | 'onJwksEvent'>): string | null {
+  if (options.maxJwksAgeMs !== undefined) {
+    const age = options.maxJwksAgeMs;
+    if (typeof age !== 'number' || !Number.isInteger(age) || age <= 0 || age > MAX_JWKS_AGE_CAP_MS) {
+      return `maxJwksAgeMs must be a whole number of milliseconds from 1 to ${MAX_JWKS_AGE_CAP_MS} (25 days)`;
+    }
+  }
+  if (options.keySetStore !== undefined) {
+    const store = options.keySetStore as Partial<KeySetStore> | null;
+    if (!store || typeof store.load !== 'function' || typeof store.save !== 'function') {
+      return 'keySetStore must provide load(jwksUri) and save(jwksUri, state)';
+    }
+  }
+  if (options.onJwksEvent !== undefined && typeof options.onJwksEvent !== 'function') {
+    return 'onJwksEvent must be a function';
+  }
+  return null;
+}
+
+const FAMILY_NOUN: Record<'delegation' | 'proof', string> = { delegation: 'a delegation key', proof: 'a proof key' };
+
+/**
+ * The signature step both checks share: the issuer's key for this token's family, then the
+ * signature and the key's window. Null when the token is signed by a key the issuer stands behind;
+ * otherwise the failure, with the same reasons and hints for either family.
+ */
+export async function checkTokenSignature(params: {
+  parsed: NonNullable<ReturnType<typeof parseJwt>>;
+  alg: SupportedAlgorithm;
+  issuer: TrustedIssuer;
+  family: 'delegation' | 'proof';
+  /** The token's own handle, for a `key_revoked` pull hint. */
+  handle: string;
+  iat: number;
+  exp: number;
+  fetch: FetchLike;
+  timeoutMs: number;
+  keySetOptions: KeySetOptions;
+}): Promise<VerificationFailure | null> {
+  const { parsed, alg, issuer, keySetOptions } = params;
+  const resolution = await resolveVerificationKeys({
+    jwksUri: issuer.jwksUri,
+    kid: typeof parsed.header.kid === 'string' ? parsed.header.kid : undefined,
+    alg,
+    family: params.family,
+    fetch: params.fetch,
+    timeoutMs: params.timeoutMs,
+    ...keySetOptions,
+  });
+  switch (resolution.kind) {
+    case 'unavailable':
+      // "I could not check" is not "the token is bad" — it gets its own reason.
+      return fail('jwks_unavailable', resolution.message) as VerificationFailure;
+    case 'stale':
+      return fail(
+        'jwks_stale',
+        `the issuer JWKS could not be refetched and the cached copy is older than maxJwksAgeMs (${keySetOptions.maxJwksAgeMs} ms)`,
+        { cacheAgeSeconds: resolution.cacheAgeSeconds, refreshHint: { jwksUri: issuer.jwksUri, method: 'refreshJwks' } }
+      ) as VerificationFailure;
+    case 'revoked':
+      // Decided before the signature: the key is revoked, whoever signed with it.
+      return fail('key_revoked', `the issuer revoked signing key "${resolution.kid}"`, {
+        pullHint: { issuerOrigin: new URL(issuer.jwksUri).origin, handle: params.handle },
+      }) as VerificationFailure;
+    case 'wrong_purpose':
+      return fail('wrong_key_purpose', `signing key "${resolution.kid}" is not ${FAMILY_NOUN[params.family]}`) as VerificationFailure;
+    case 'unknown':
+      return fail('unknown_key', 'no key in the issuer JWKS matches this token') as VerificationFailure;
+    case 'keys':
+      break;
+  }
+
+  const verdict = await verifyWithCandidates(resolution, alg, parsed.signingInput, parsed.signature, {
+    iat: params.iat,
+    exp: params.exp,
+  });
+  if (verdict === 'bad_signature') return fail('bad_signature', 'token signature is invalid') as VerificationFailure;
+  if (verdict === 'outside_key_window') {
+    return fail('outside_key_window', "token iat lies outside the signing key's window") as VerificationFailure;
+  }
+  if (verdict === 'token_lifetime_exceeded') {
+    return fail('token_lifetime_exceeded', "token exp lies beyond iat plus the signing key's max_token_lifetime") as VerificationFailure;
+  }
+  return null;
 }
 
 export async function verifyDelegation(token: string, options: VerifyOptions): Promise<VerificationResult> {
@@ -121,31 +211,12 @@ export async function verifyDelegation(token: string, options: VerifyOptions): P
     }
   }
 
-  if (options.maxJwksAgeMs !== undefined) {
-    const age = options.maxJwksAgeMs;
-    if (typeof age !== 'number' || !Number.isInteger(age) || age <= 0 || age > MAX_JWKS_AGE_CAP_MS) {
-      return fail(
-        'invalid_options',
-        `maxJwksAgeMs must be a whole number of milliseconds from 1 to ${MAX_JWKS_AGE_CAP_MS} (25 days)`
-      );
-    }
-  }
-  if (options.keySetStore !== undefined) {
-    const store = options.keySetStore as Partial<KeySetStore> | null;
-    if (!store || typeof store.load !== 'function' || typeof store.save !== 'function') {
-      return fail('invalid_options', 'keySetStore must provide load(jwksUri) and save(jwksUri, state)');
-    }
-  }
-  if (options.onJwksEvent !== undefined && typeof options.onJwksEvent !== 'function') {
-    return fail('invalid_options', 'onJwksEvent must be a function');
-  }
+  const keySetProblem = keySetOptionsProblem(options);
+  if (keySetProblem) return fail('invalid_options', keySetProblem);
 
   const issuers = Array.isArray(options.trustedIssuers) ? options.trustedIssuers.filter(isValidIssuerEntry) : [];
   if (issuers.length === 0) {
-    return fail(
-      'no_trust_policy',
-      'trustedIssuers is empty: this verifier has no built-in trust list, so the caller must name the issuers it accepts (each with an https jwksUri)'
-    );
+    return fail('no_trust_policy', NO_TRUST_POLICY_MESSAGE);
   }
 
   const fetchImpl: FetchLike = options.fetch ?? ((input, init) => fetch(input, init));
@@ -237,46 +308,19 @@ export async function verifyDelegation(token: string, options: VerifyOptions): P
     keySetStore: options.keySetStore,
     onJwksEvent: options.onJwksEvent,
   };
-  const resolution = await resolveVerificationKeys({
-    jwksUri: issuer.jwksUri,
-    kid: typeof parsed.header.kid === 'string' ? parsed.header.kid : undefined,
+  const signatureFailure = await checkTokenSignature({
+    parsed,
     alg,
+    issuer,
     family: 'delegation',
+    handle: sub,
+    iat,
+    exp,
     fetch: fetchImpl,
     timeoutMs,
-    ...keySetOptions,
+    keySetOptions,
   });
-  switch (resolution.kind) {
-    case 'unavailable':
-      // "I could not check" is not "the token is bad" — it gets its own reason.
-      return fail('jwks_unavailable', resolution.message);
-    case 'stale':
-      return fail(
-        'jwks_stale',
-        `the issuer JWKS could not be refetched and the cached copy is older than maxJwksAgeMs (${keySetOptions.maxJwksAgeMs} ms)`,
-        { cacheAgeSeconds: resolution.cacheAgeSeconds, refreshHint: { jwksUri: issuer.jwksUri, method: 'refreshJwks' } }
-      );
-    case 'revoked':
-      // Decided before the signature: the key is revoked, whoever signed with it.
-      return fail('key_revoked', `the issuer revoked signing key "${resolution.kid}"`, {
-        pullHint: { issuerOrigin: new URL(issuer.jwksUri).origin, handle: sub },
-      });
-    case 'wrong_purpose':
-      return fail('wrong_key_purpose', `signing key "${resolution.kid}" is not a delegation key`);
-    case 'unknown':
-      return fail('unknown_key', 'no key in the issuer JWKS matches this token');
-    case 'keys':
-      break;
-  }
-
-  const verdict = await verifyWithCandidates(resolution, alg, parsed.signingInput, parsed.signature, { iat, exp });
-  if (verdict === 'bad_signature') return fail('bad_signature', 'token signature is invalid');
-  if (verdict === 'outside_key_window') {
-    return fail('outside_key_window', "token iat lies outside the signing key's window");
-  }
-  if (verdict === 'token_lifetime_exceeded') {
-    return fail('token_lifetime_exceeded', "token exp lies beyond iat plus the signing key's max_token_lifetime");
-  }
+  if (signatureFailure) return signatureFailure;
 
   const delegation = {
     issuer: issuer.issuer,
@@ -320,6 +364,9 @@ export async function verifyDelegation(token: string, options: VerifyOptions): P
       return fail('expired', status.message, renewalPointer(claims.renewal_url, issuer));
     case 'unknown':
       return fail('unknown_delegation', status.message);
+    case 'superseded':
+      // Read only for proofs (`status.ts`); unreachable for a delegation, failed closed if it ever is.
+      return fail('status_unavailable', status.message);
     case 'test_environment':
       return fail('test_environment', status.message);
     case 'untrusted_uri':

@@ -95,6 +95,9 @@ presented as *"X says it authorized this"*, never as *verified*.
 5. **Delegate** — the token's `delegate` and the identity you resolved are both canonicalized
    by the same per-registry rule, then compared exactly (`delegateMatches`): npm, PyPI and Composer
    names ignore case (PyPI also folds `-`, `_`, `.`), a Go module path and a URL path keep theirs.
+   **`canonicalizeDelegate`'s output changed in 0.2.1:** `pkg:pypi/zope.interface` now canonicalizes to
+   `pkg:pypi/zope-interface`, and Composer names are lowercased. If you store its output as a key, keys
+   written by 0.2.0 or earlier will not match the ones 0.2.1 and later produce.
 6. **Status** — two channels, both authenticated, asked in order:
    - the IETF Token Status List the token points at (`status.status_list`), whose uri is
      refused unless it belongs to your trusted issuer, and whose signature is checked against
@@ -286,6 +289,7 @@ The endpoint is also where `test_environment` comes from: proof.holdings answers
 test mode, and packs that delegation's list slot as `3`, a value this verifier reads as no answer, so the
 endpoint is asked. That holds for a list built after the token was issued. A list built before it reads the
 slot as `0`, so for up to about two minutes after issuance a test-mode delegation can verify as valid.
+`verifyProofToken` reads the same answer for a proof token issued in test mode.
 
 ### One thing a failure reason is not
 

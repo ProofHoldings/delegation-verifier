@@ -54,10 +54,15 @@ export type StatusOutcome =
   | { state: 'expired'; message: string }
   /** The issuer has no record of the delegation at all. */
   | { state: 'unknown'; message: string }
-  /** The issuer says this delegation was issued in test mode — never valid outside it. */
+  /** A proof the issuer has since re-issued: this token is no longer the current one (proofs only). */
+  | { state: 'superseded'; message: string }
+  /** The issuer says this proof or delegation was issued in test mode — never valid outside it. */
   | { state: 'test_environment'; message: string }
   | { state: 'untrusted_uri'; message: string }
   | { state: 'unavailable'; message: string };
+
+/** What the token is, for the messages — and the one difference in how the endpoint is read. */
+export type StatusSubject = 'delegation' | 'proof';
 
 const STATUS_VALID = 0;
 const STATUS_REVOKED = 1;
@@ -122,8 +127,9 @@ async function checkStatusList(params: {
   now: Date;
   clockToleranceSeconds: number;
   keySetOptions: KeySetOptions;
+  subject: StatusSubject;
 }): Promise<StatusOutcome> {
-  const { claim, issuer } = params;
+  const { claim, issuer, subject } = params;
 
   let uri: URL;
   try {
@@ -261,9 +267,9 @@ async function checkStatusList(params: {
     // A slot beyond the list is not "valid" — the issuer has no answer for this token.
     return { state: 'unavailable', message: `status list has no slot ${claim.idx}` };
   }
-  if (slot === STATUS_REVOKED) return { state: 'revoked', message: 'the issuer status list marks this delegation revoked' };
+  if (slot === STATUS_REVOKED) return { state: 'revoked', message: `the issuer status list marks this ${subject} revoked` };
   if (slot === STATUS_SUSPENDED) {
-    return { state: 'suspended', message: 'the issuer status list marks this delegation suspended' };
+    return { state: 'suspended', message: `the issuer status list marks this ${subject} suspended` };
   }
   if (slot !== STATUS_VALID) {
     return { state: 'unavailable', message: `status list slot carries unknown status ${slot}` };
@@ -281,7 +287,9 @@ async function checkStatusEndpoint(params: {
   issuer: TrustedIssuer;
   fetch: FetchLike;
   timeoutMs: number;
+  subject: StatusSubject;
 }): Promise<StatusOutcome> {
+  const { subject } = params;
   const endpoint = params.issuer.statusEndpoint;
   if (!endpoint) {
     return {
@@ -328,15 +336,21 @@ async function checkStatusEndpoint(params: {
   const reason = typeof body.reason === 'string' ? body.reason : '';
   switch (reason) {
     case 'revoked':
-      return { state: 'revoked', message: 'the issuer reports this delegation revoked' };
+      return { state: 'revoked', message: `the issuer reports this ${subject} revoked` };
     case 'suspended':
-      return { state: 'suspended', message: 'the issuer reports this delegation suspended' };
+      return { state: 'suspended', message: `the issuer reports this ${subject} suspended` };
     case 'expired':
-      return { state: 'expired', message: 'the issuer reports this delegation expired' };
+      return { state: 'expired', message: `the issuer reports this ${subject} expired` };
     case 'unknown_delegation':
-      return { state: 'unknown', message: 'the issuer has no record of this delegation' };
+      return { state: 'unknown', message: `the issuer has no record of this ${subject}` };
+    case 'superseded':
+      // Only a proof is re-issued under a new `jti`; for a delegation the word is unrecognised and
+      // fails closed like any other.
+      if (subject === 'proof') return { state: 'superseded', message: 'the issuer has re-issued this proof; this token is no longer the current one' };
+      return { state: 'unavailable', message: 'the issuer answered invalid without a recognised reason (superseded)' };
     case 'test_environment':
-      return { state: 'test_environment', message: 'the issuer reports this delegation was issued in test mode' };
+      // The issuer answers it for a test-mode proof as well as a test-mode delegation.
+      return { state: 'test_environment', message: `the issuer reports this ${subject} was issued in test mode` };
     default:
       return {
         state: 'unavailable',
@@ -359,7 +373,10 @@ export async function checkDelegationStatus(params: {
   clockToleranceSeconds: number;
   /** Omitted: the package defaults, as `verifyDelegation` applies them. */
   keySetOptions?: KeySetOptions;
+  /** Omitted: `delegation`. */
+  subject?: StatusSubject;
 }): Promise<StatusOutcome> {
+  const subject = params.subject ?? 'delegation';
   const claim = readStatusListClaim(params.claims);
   if (claim) {
     const listOutcome = await checkStatusList({
@@ -370,6 +387,7 @@ export async function checkDelegationStatus(params: {
       now: params.now,
       clockToleranceSeconds: params.clockToleranceSeconds,
       keySetOptions: params.keySetOptions ?? { maxJwksAgeMs: DEFAULT_MAX_JWKS_AGE_MS },
+      subject,
     });
     // Authoritative for `valid`/`revoked`/`suspended` — the fold (h-status-list-cascade-fold)
     // makes those three the issuer's whole answer for this delegation's own bit.
@@ -385,5 +403,6 @@ export async function checkDelegationStatus(params: {
     issuer: params.issuer,
     fetch: params.fetch,
     timeoutMs: params.timeoutMs,
+    subject,
   });
 }

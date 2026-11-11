@@ -170,7 +170,7 @@ export type FailureReason =
   | 'suspended'
   /** The issuer has no record of this delegation — distinct from "it could not answer". */
   | 'unknown_delegation'
-  /** The issuer reports the delegation was issued in test mode — a refusal, not "could not check". */
+  /** The issuer reports the delegation (or, for `verifyProofToken`, the proof) was issued in test mode — a refusal, not "could not check". */
   | 'test_environment'
   /** Card carries no delegation publication. */
   | 'no_publication'
@@ -276,3 +276,65 @@ export interface VerificationFailure {
 }
 
 export type VerificationResult = VerificationSuccess | VerificationFailure;
+
+/**
+ * Proof tokens (`verifyProofToken`): the issuer's OTHER token family — a statement that the holder
+ * of an identifier (a domain, an email, a handle…) proved control of it. Same keys document, its own
+ * key family (`proof`), and it never carries the identifier itself: `identifier_hash` is the SHA-256
+ * of its canonical form. So the caller supplies that canonical form, exactly as `delegate` is
+ * supplied for a delegation — the token is a bearer artifact, and the comparison against what the
+ * CALLER expects is what stops a genuine token being shown beside someone else's identifier.
+ */
+export interface ProofExpectation {
+  /** The proof type the token must carry in its `type` claim, e.g. `domain`, `email`, `social`. */
+  type: string;
+  /**
+   * The identifier in the issuer's canonical form (proof.holdings: a domain lowercased without
+   * `www.`, an email lowercased, a phone in E.164, a handle lowercased without `@`). Hashed with
+   * SHA-256 and compared to `identifier_hash`; this package does not canonicalize, so a value in
+   * another form answers `identifier_mismatch`.
+   */
+  identifier: string;
+}
+
+export interface ProofVerifyOptions extends Omit<VerifyOptions, 'delegate' | 'expectedPrincipal'> {
+  /** REQUIRED. What the caller expects this proof to be about. */
+  expected: ProofExpectation;
+}
+
+export type ProofFailureReason =
+  | FailureReason
+  /** The token is not a proof token (it carries `token_type`, e.g. a delegation). */
+  | 'not_a_proof'
+  /** The token proves another type of identifier than the one expected. */
+  | 'proof_type_mismatch'
+  /** The token is about another identifier than the one expected. */
+  | 'identifier_mismatch'
+  /** The issuer has re-issued this proof; the token shown is no longer the current one. */
+  | 'superseded';
+
+export interface VerifiedProof {
+  issuer: string;
+  /** The stable public handle of the proof, when the token carries one. */
+  proofId: string | null;
+  type: string;
+  /** How control was shown (e.g. `dns`, `x`, `ethereum`), as the token says; null when absent. */
+  channel: string | null;
+  identifierHash: string;
+  verifiedAt: Date | null;
+  issuedAt: Date;
+  expiresAt: Date;
+}
+
+export interface ProofVerificationSuccess {
+  valid: true;
+  /** False only when `statusCheck: 'skip'` was requested. */
+  statusChecked: boolean;
+  proof: VerifiedProof;
+}
+
+export interface ProofVerificationFailure extends Omit<VerificationFailure, 'reason'> {
+  reason: ProofFailureReason;
+}
+
+export type ProofVerificationResult = ProofVerificationSuccess | ProofVerificationFailure;
